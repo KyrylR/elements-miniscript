@@ -28,8 +28,8 @@ use elements::secp256k1_zkp;
 
 use crate::descriptor::checksum::{self, verify_checksum};
 use crate::descriptor::{
-    ConversionError, DefiniteDescriptorKey, DescriptorSecretKey, DescriptorPublicKey,
-    DescriptorXKey, Wildcard
+    ConversionError, DefiniteDescriptorKey, DescriptorPublicKey, DescriptorSecretKey,
+    DescriptorXKey, Wildcard,
 };
 use crate::expression::FromTree;
 use crate::extensions::{CovExtArgs, CovenantExt, Extension, ParseableExt};
@@ -83,13 +83,16 @@ impl Key {
                     // Convert into a DefiniteDescriptorKey, note that we are deriving the xpub
                     // since there is not wildcard.
                     // Consider adding DescriptorPublicKey::to_definite_descriptor
-                    let pk = pk.clone().at_derivation_index(0).expect("single or xpub without wildcards");
+                    let pk = pk
+                        .clone()
+                        .at_derivation_index(0)
+                        .expect("single or xpub without wildcards");
                     // Derive explicitly rather than relying on ToPublicKey::to_public_key,
                     // which panics on keys with hardened derivation steps.
                     let pk = pk.derive_public_key(secp)?;
                     Ok(bare::tweak_key(secp, spk, &pk))
                 }
-            },
+            }
             Key::View(ref sk) => {
                 if sk.is_multipath() {
                     Err(Error::Unexpected("multipath blinding key".into()))
@@ -98,11 +101,13 @@ impl Key {
                     if pk.has_wildcard() {
                         Err(Error::Unexpected("wildcard blinding key".into()))
                     } else {
-                        let pk = pk.at_derivation_index(0).expect("single or xprv without wildcards");
+                        let pk = pk
+                            .at_derivation_index(0)
+                            .expect("single or xprv without wildcards");
                         Ok(bare::tweak_key(secp, spk, &pk))
                     }
                 }
-            },
+            }
         }
     }
 }
@@ -130,7 +135,10 @@ impl<T: Extension + ParseableExt> Descriptor<DescriptorPublicKey, T> {
     ///
     /// # Errors
     /// - If index ≥ 2^31
-    pub fn at_derivation_index(&self, index: u32) -> Result<Descriptor<DefiniteDescriptorKey, T>, ConversionError> {
+    pub fn at_derivation_index(
+        &self,
+        index: u32,
+    ) -> Result<Descriptor<DefiniteDescriptorKey, T>, ConversionError> {
         let definite_key = match self.key.clone() {
             Key::Slip77(k) => Key::Slip77(k),
             Key::Bare(k) => Key::Bare(k.at_derivation_index(index)?.into_descriptor_public_key()),
@@ -157,12 +165,12 @@ impl<T: Extension + ParseableExt> Descriptor<DescriptorPublicKey, T> {
                         derivation_path,
                         wildcard: Wildcard::None,
                     })
-                },
+                }
                 DescriptorSecretKey::MultiXPrv(_) => return Err(ConversionError::MultiKey),
             }),
         };
         let definite_descriptor = self.descriptor.at_derivation_index(index)?;
-        Ok(Descriptor{
+        Ok(Descriptor {
             key: definite_key,
             descriptor: definite_descriptor,
         })
@@ -550,8 +558,20 @@ mod tests {
         ] {
             let desc = Descriptor::<DefiniteDescriptorKey>::from_str(&desc_str).unwrap();
             assert_eq!(desc.to_string(), desc_str);
-            assert_eq!(addr_conf, &desc.address(&secp, &elements::AddressParams::LIQUID).unwrap().to_string());
-            assert_eq!(addr_unconf, &desc.unconfidential_address(&elements::AddressParams::LIQUID).unwrap().to_string());
+            assert_eq!(
+                addr_conf,
+                &desc
+                    .address(&secp, &elements::AddressParams::LIQUID)
+                    .unwrap()
+                    .to_string()
+            );
+            assert_eq!(
+                addr_unconf,
+                &desc
+                    .unconfidential_address(&elements::AddressParams::LIQUID)
+                    .unwrap()
+                    .to_string()
+            );
         }
     }
 
@@ -580,10 +600,8 @@ mod tests {
 
         let desc: Descriptor<DefiniteDescriptorKey, NoExt> = Descriptor {
             key: Key::Bare(DescriptorPublicKey::from_str(&format!("{}/0h", xpub)).unwrap()),
-            descriptor: crate::Descriptor::new_wpkh(
-                DefiniteDescriptorKey::from_str(xpub).unwrap(),
-            )
-            .unwrap(),
+            descriptor: crate::Descriptor::new_wpkh(DefiniteDescriptorKey::from_str(xpub).unwrap())
+                .unwrap(),
         };
 
         assert_eq!(
@@ -628,20 +646,50 @@ mod tests {
         let desc_bare = Descriptor::<DescriptorPublicKey>::from_str(&desc_bare_str).unwrap();
         let definite_desc_view = desc_view.at_derivation_index(index).unwrap();
         let definite_desc_bare = desc_bare.at_derivation_index(index).unwrap();
-        assert_eq!(definite_desc_view.address(&secp, params).unwrap().to_string(), conf_addr.to_string());
-        assert_eq!(definite_desc_bare.address(&secp, params).unwrap().to_string(), conf_addr.to_string());
-        assert_eq!(definite_desc_view.unconfidential_address(params).unwrap().to_string(), unconf_addr.to_string());
-        assert_eq!(definite_desc_bare.unconfidential_address(params).unwrap().to_string(), unconf_addr.to_string());
+        assert_eq!(
+            definite_desc_view
+                .address(&secp, params)
+                .unwrap()
+                .to_string(),
+            conf_addr.to_string()
+        );
+        assert_eq!(
+            definite_desc_bare
+                .address(&secp, params)
+                .unwrap()
+                .to_string(),
+            conf_addr.to_string()
+        );
+        assert_eq!(
+            definite_desc_view
+                .unconfidential_address(params)
+                .unwrap()
+                .to_string(),
+            unconf_addr.to_string()
+        );
+        assert_eq!(
+            definite_desc_bare
+                .unconfidential_address(params)
+                .unwrap()
+                .to_string(),
+            unconf_addr.to_string()
+        );
 
         // It's not possible to get an address if the blinding key has a wildcard,
         // because the descriptor blinding key is not *definite*,
         // but we can't enforce this with the Descriptor generic.
         let desc_view_str = format!("ct({}/*,elwpkh({}))#ls6mx2ac", xprv, xpub);
         let desc_view = Descriptor::<DefiniteDescriptorKey>::from_str(&desc_view_str).unwrap();
-        assert_eq!(desc_view.address(&secp, params).unwrap_err(), Error::Unexpected("wildcard blinding key".into()));
+        assert_eq!(
+            desc_view.address(&secp, params).unwrap_err(),
+            Error::Unexpected("wildcard blinding key".into())
+        );
 
         let desc_bare_str = format!("ct({}/*,elwpkh({}))#czkz0hwn", xpub, xpub);
         let desc_bare = Descriptor::<DefiniteDescriptorKey>::from_str(&desc_bare_str).unwrap();
-        assert_eq!(desc_bare.address(&secp, params).unwrap_err(), Error::Unexpected("wildcard blinding key".into()));
+        assert_eq!(
+            desc_bare.address(&secp, params).unwrap_err(),
+            Error::Unexpected("wildcard blinding key".into())
+        );
     }
 }

@@ -701,7 +701,10 @@ where
                 Terminal::After(ref n) => {
                     debug_assert_eq!(node_state.n_evaluated, 0);
                     debug_assert_eq!(node_state.n_satisfied, 0);
-                    return Some(self.stack.evaluate_after(LockTime::from(*n), self.lock_time));
+                    return Some(
+                        self.stack
+                            .evaluate_after(LockTime::from(*n), self.lock_time),
+                    );
                 }
                 Terminal::Older(ref n) => {
                     debug_assert_eq!(node_state.n_evaluated, 0);

@@ -5,9 +5,9 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use bitcoin_miniscript::ToPublicKey;
-use elements::{LockTime, SchnorrSig, Sequence};
 use elements::taproot::TapLeafHash;
-use simplicity::{Policy, FailEntropy, Preimage32};
+use elements::{LockTime, SchnorrSig, Sequence};
+use simplicity::{FailEntropy, Policy, Preimage32};
 
 use crate::policy::concrete::PolicyError;
 use crate::{expression, Error, MiniscriptKey};
@@ -98,8 +98,10 @@ impl_from_str!(
 // We cannot use our wrapper because we don't own the Policy (we have a reference)
 // Implementing a wrapper of Cow<'a, Policy<Pk>> leads to lifetime issues
 // when implementing ForEachKey, because for_each_key() has its own lifetime 'a
-pub fn for_each_key<'a, Pk: MiniscriptKey + 'a, F: FnMut(&'a Pk) -> bool>(policy: &'a Policy<Pk>, mut pred: F) -> bool
-{
+pub fn for_each_key<'a, Pk: MiniscriptKey + 'a, F: FnMut(&'a Pk) -> bool>(
+    policy: &'a Policy<Pk>,
+    mut pred: F,
+) -> bool {
     let mut stack = vec![policy];
 
     while let Some(top) = stack.pop() {
@@ -136,7 +138,9 @@ impl<Pk: ToPublicKey, S: crate::Satisfier<Pk>> SatisfierWrapper<Pk, S> {
     }
 }
 
-impl<Pk: ToPublicKey, S: crate::Satisfier<Pk>> simplicity::Satisfier<Pk> for SatisfierWrapper<Pk, S> {
+impl<Pk: ToPublicKey, S: crate::Satisfier<Pk>> simplicity::Satisfier<Pk>
+    for SatisfierWrapper<Pk, S>
+{
     fn lookup_tap_leaf_script_sig(&self, pk: &Pk, hash: &TapLeafHash) -> Option<SchnorrSig> {
         self.0.lookup_tap_leaf_script_sig(pk, hash)
     }
@@ -156,9 +160,9 @@ impl<Pk: ToPublicKey, S: crate::Satisfier<Pk>> simplicity::Satisfier<Pk> for Sat
 
 #[cfg(test)]
 mod tests {
-    use secp256k1::XOnlyPublicKey;
-    use crate::DescriptorPublicKey;
     use super::*;
+    use crate::DescriptorPublicKey;
+    use secp256k1::XOnlyPublicKey;
 
     #[test]
     fn parse_bad_thresh() {
@@ -202,7 +206,9 @@ mod tests {
         let s = "[78412e3a/44'/0'/0']xpub6ERApfZwUNrhLCkDtcHTcxd75RbzS1ed54G1LkBUHQVHQKqhMkhgbmJbZRkrgZw4koxb5JaHWkY4ALHY2grBGRjaDMzQLcgJvLJuZZvRcEL/1/*";
         let decoded_key = DescriptorPublicKey::from_str(s).expect("constant key");
         let s = format!("pk({})", s);
-        let decoded_policy = PolicyWrapper::<DescriptorPublicKey>::from_str(&s).expect("decode policy").0;
+        let decoded_policy = PolicyWrapper::<DescriptorPublicKey>::from_str(&s)
+            .expect("decode policy")
+            .0;
 
         if let Policy::Key(key) = decoded_policy {
             assert_eq!(decoded_key, key);

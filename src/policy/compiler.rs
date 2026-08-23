@@ -19,7 +19,7 @@ use elements::{LockTime, Sequence};
 
 use crate::miniscript::context::SigType;
 use crate::miniscript::limits::MAX_PUBKEYS_PER_MULTISIG;
-use crate::miniscript::types::{self, ErrorKind, ExtData, Property, Type, Error};
+use crate::miniscript::types::{self, Error, ErrorKind, ExtData, Property, Type};
 use crate::miniscript::ScriptContext;
 use crate::policy::Concrete;
 use crate::{policy, Extension, Miniscript, MiniscriptKey, Terminal};
@@ -850,12 +850,10 @@ fn insert_elem<Pk: MiniscriptKey, Ctx: ScriptContext>(
     // Check whether the new element is worse than any existing element. If there
     // is an element which is a subtype of the current element and has better
     // cost, don't consider this element.
-    let is_worse = map
-        .iter()
-        .any(|(existing_key, existing_elem)| {
-            let existing_elem_cost = existing_elem.cost_1d(sat_prob, dissat_prob);
-            existing_key.is_subtype(elem_key) && existing_elem_cost <= elem_cost
-        });
+    let is_worse = map.iter().any(|(existing_key, existing_elem)| {
+        let existing_elem_cost = existing_elem.cost_1d(sat_prob, dissat_prob);
+        existing_key.is_subtype(elem_key) && existing_elem_cost <= elem_cost
+    });
     if !is_worse {
         // If the element is not worse any element in the map, remove elements
         // whose subtype is the current element and have worse cost.

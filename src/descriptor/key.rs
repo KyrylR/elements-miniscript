@@ -1018,9 +1018,7 @@ impl<K: InnerXKey> DescriptorXKey<K> {
         let (compare_fingerprint, compare_path) = match self.origin {
             Some((fingerprint, ref path)) => (
                 fingerprint,
-                path.into_iter()
-                    .chain(&self.derivation_path)
-                    .collect(),
+                path.into_iter().chain(&self.derivation_path).collect(),
             ),
             None => (
                 self.xkey.xkey_fingerprint(secp),
@@ -1039,9 +1037,7 @@ impl<K: InnerXKey> DescriptorXKey<K> {
             };
 
         if &compare_fingerprint == fingerprint
-            && compare_path
-                .into_iter()
-                .eq(&path_excluding_wildcard)
+            && compare_path.into_iter().eq(&path_excluding_wildcard)
         {
             Some(path_excluding_wildcard)
         } else {
