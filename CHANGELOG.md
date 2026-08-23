@@ -1,3 +1,8 @@
+# Unreleased
+
+- Upgrade `rust-simplicity` to 0.8.0 and align the minimum supported Rust version [#104](https://github.com/ElementsProject/elements-miniscript/pull/104).
+- Support CMR-only Simplicity leaves in Taproot descriptors using `sim{asm(CMR)}` [#104](https://github.com/ElementsProject/elements-miniscript/pull/104).
+
 # 0.4.0 - Oct 8, 2024
 
 - Use rust-bitcoin 0.32.0 and rust-elements 0.25.0 [#90](https://github.com/ElementsProject/elements-miniscript/pull/90)
@@ -22,4 +27,3 @@
 # 0.2.0 - June 15, 2023
 
 - Still rapid iteration, very unstable.
-
