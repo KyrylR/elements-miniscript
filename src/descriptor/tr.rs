@@ -940,6 +940,9 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "simplicity")]
+    use elements::hex::ToHex;
+
     use super::*;
     use crate::{ForEachKey, NoExt};
 
@@ -1031,5 +1034,38 @@ mod tests {
 
         assert_eq!(leaf.satisfy(()), Err(Error::CouldNotSatisfy));
         assert_eq!(descriptor.get_satisfaction(()), Err(Error::CouldNotSatisfy));
+    }
+
+    #[test]
+    #[cfg(feature = "simplicity")]
+    fn raw_simplicity_cmr_roundtrips() {
+        let cmr = "11".repeat(32);
+        let raw = format!("eltr({},sim{{asm({})}})", INTERNAL_KEY, cmr);
+        let descriptor = Tr::<bitcoin::PublicKey, NoExt>::from_str(&raw)
+            .expect("valid raw-CMR Taproot descriptor");
+        let rendered = descriptor.to_string();
+
+        assert_eq!(checksum::desc_checksum(&raw).unwrap(), "g7a9hfgp");
+        assert_eq!(rendered, format!("{}#g7a9hfgp", raw));
+        assert_eq!(
+            Tr::<bitcoin::PublicKey, NoExt>::from_str(&rendered).unwrap(),
+            descriptor
+        );
+
+        let leaves: Vec<_> = descriptor.iter_scripts().collect();
+        assert_eq!(leaves.len(), 1);
+        assert_eq!(leaves[0].0, 0);
+        assert_eq!(leaves[0].1.version().as_u8(), 0xbe);
+        assert_eq!(leaves[0].1.encode().as_bytes(), &[0x11; 32]);
+        assert_eq!(
+            descriptor.script_pubkey().to_hex(),
+            "512063e475b284ff60b191cde79553676712ee0e67ddf15bed86d576434218d47185"
+        );
+        assert_eq!(
+            descriptor
+                .address(None, &elements::AddressParams::LIQUID_TESTNET)
+                .to_string(),
+            "tex1pv0j8tv5ylastrywdu724xem8zthque7a79d7mpk4wep5yxx5wxzs4xp4za"
+        );
     }
 }

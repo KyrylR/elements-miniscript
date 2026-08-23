@@ -3,7 +3,7 @@ use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use simplicity::{FailEntropy, Policy};
+use simplicity::{Cmr, FailEntropy, Policy};
 
 use crate::policy::concrete::PolicyError;
 use crate::{expression, Error, MiniscriptKey};
@@ -23,6 +23,13 @@ impl_from_tree!(
             }),
             ("sha256", 1) => expression::terminal(&top.args[0], |x| {
                 Pk::Sha256::from_str(x).map(Policy::Sha256)
+            }),
+            // Following rust-simplicity's `Policy::Assembly` terminology
+            // https://github.com/BlockstreamResearch/rust-simplicity/blob/a8896cf93ed683d8ae1430371ad7d196ab061fa5/src/policy/ast.rs#L54
+            ("asm", 1) => expression::terminal(&top.args[0], |cmr| {
+                Cmr::from_str(cmr)
+                    .map(Policy::Assembly)
+                    .map_err(|e| Error::Unexpected(e.to_string()))
             }),
             ("and", _) => {
                 if top.args.len() != 2 {
