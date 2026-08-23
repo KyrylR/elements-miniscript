@@ -317,6 +317,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "ghost-cell"
+version = "0.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d8449d342b1c67f49169e92e71deb7b9b27f30062301a16dbc27a4cc8d2351b7"
+
+[[package]]
 name = "hex-conservative"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -561,15 +567,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28d3b2b1366ec20994f1fd18c3c594f05c5dd4bc44d8bb0c1c632c8d6829481f"
 
 [[package]]
-name = "santiago"
-version = "1.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de36022292bc2086eb8f55bffa460fef3475e4459b478820711f4c421feb87ec"
-dependencies = [
- "regex",
-]
-
-[[package]]
 name = "secp256k1"
 version = "0.28.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -689,26 +686,26 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
 name = "simplicity-lang"
-version = "0.3.1"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d75c8fb4a18e63fbce4cf16026c36a6c38066e4f4a09ce5e81be817d0e36d8f8"
+checksum = "13ed081e3046d66c146d7201bcbf3b655ca3436cb83f6efc26d7895bd2b79d06"
 dependencies = [
  "bitcoin 0.32.7",
  "bitcoin_hashes 0.14.0",
  "byteorder",
  "elements",
  "getrandom",
- "hex-conservative 0.1.2",
+ "ghost-cell",
+ "hex-conservative 0.2.1",
  "miniscript",
- "santiago",
  "simplicity-sys",
 ]
 
 [[package]]
 name = "simplicity-sys"
-version = "0.3.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4cd2cc5d458a8032d328ea85e824f54f61664ab84c3d42b3b7f8804fb9b81572"
+checksum = "96d1ec5477c7650b8ef511aa56dccb28f2e8cdb6e87f260ecffdaf0ebfef2d3b"
 dependencies = [
  "bitcoin_hashes 0.14.0",
  "cc",

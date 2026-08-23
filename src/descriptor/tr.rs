@@ -552,14 +552,7 @@ impl<'a, Pk: ToPublicKey, Ext: ParseableExt> TapLeafScript<'a, Pk, Ext> {
         match self {
             TapLeafScript::Miniscript(ms) => ms.satisfy(satisfier),
             #[cfg(feature = "simplicity")]
-            TapLeafScript::Simplicity(sim) => {
-                let satisfier = crate::simplicity::SatisfierWrapper::new(satisfier);
-                let program = sim
-                    .satisfy(&satisfier)
-                    .map_err(|_| Error::CouldNotSatisfy)?;
-                let (program_bytes, witness_bytes) = program.encode_to_vec();
-                Ok(vec![witness_bytes, program_bytes])
-            }
+            TapLeafScript::Simplicity(..) => Err(Error::CouldNotSatisfy),
         }
     }
 }
@@ -950,6 +943,9 @@ mod tests {
     use super::*;
     use crate::{ForEachKey, NoExt};
 
+    #[cfg(feature = "simplicity")]
+    const INTERNAL_KEY: &str = "020000000000000000000000000000000000000000000000000000000000000001";
+
     #[test]
     fn test_for_each() {
         let desc = "eltr(acc0, {
@@ -1021,5 +1017,19 @@ mod tests {
                 ],
             );
         }
+    }
+
+    #[test]
+    #[cfg(feature = "simplicity")]
+    fn simplicity_satisfaction_fails_closed_without_env() {
+        let descriptor = Tr::<bitcoin::PublicKey, NoExt>::from_str(&format!(
+            "eltr({},sim{{TRIVIAL}})",
+            INTERNAL_KEY
+        ))
+        .expect("valid concrete Taproot descriptor");
+        let (_, leaf) = descriptor.iter_scripts().next().unwrap();
+
+        assert_eq!(leaf.satisfy(()), Err(Error::CouldNotSatisfy));
+        assert_eq!(descriptor.get_satisfaction(()), Err(Error::CouldNotSatisfy));
     }
 }
