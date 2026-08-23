@@ -124,6 +124,26 @@ impl<Pk: MiniscriptKey, Ext: Extension> TapTree<Pk, Ext> {
         }
     }
 
+    #[cfg(feature = "simplicity")]
+    fn validate_simplicity(&self) -> Result<(), Error> {
+        match self {
+            TapTree::Tree(left, right) => {
+                left.validate_simplicity()?;
+                right.validate_simplicity()
+            }
+            TapTree::Leaf(..) => Ok(()),
+            TapTree::SimplicityLeaf(policy)
+                if matches!(policy.as_ref(), simplicity::Policy::Assembly(..)) =>
+            {
+                Ok(())
+            }
+            TapTree::SimplicityLeaf(..) => Err(Error::BadDescriptor(
+                "core Simplicity descriptors support only sim{asm(CMR)} leaves; compile policies separately"
+                    .to_owned(),
+            )),
+        }
+    }
+
     /// Iterates over all miniscripts in DFS walk order compatible with the
     /// PSBT requirements (BIP 371).
     pub fn iter(&self) -> TapTreeIter<'_, Pk, Ext> {
@@ -217,6 +237,11 @@ impl<Pk: MiniscriptKey, Ext: Extension> fmt::Debug for TapTree<Pk, Ext> {
 impl<Pk: MiniscriptKey, Ext: Extension> Tr<Pk, Ext> {
     /// Create a new [`Tr`] descriptor from internal key and [`TapTree`]
     pub fn new(internal_key: Pk, tree: Option<TapTree<Pk, Ext>>) -> Result<Self, Error> {
+        #[cfg(feature = "simplicity")]
+        if let Some(tree) = tree.as_ref() {
+            tree.validate_simplicity()?;
+        }
+
         let nodes = tree.as_ref().map(|t| t.taptree_height()).unwrap_or(0);
 
         if nodes <= TAPROOT_CONTROL_MAX_NODE_COUNT {
@@ -612,7 +637,14 @@ impl_block_str!(
             #[cfg(feature = "simplicity")]
             expression::Tree { name, args } if *name == "sim" && args.len() == 1 => {
                 let policy = crate::simplicity::PolicyWrapper::<Pk>::from_str(args[0].name)?;
-                Ok(TapTree::SimplicityLeaf(Arc::new(policy.0)))
+                if matches!(&policy.0, simplicity::Policy::Assembly(..)) {
+                    Ok(TapTree::SimplicityLeaf(Arc::new(policy.0)))
+                } else {
+                    Err(Error::BadDescriptor(
+                        "core Simplicity descriptors support only sim{asm(CMR)} leaves; compile policies separately"
+                            .to_owned(),
+                    ))
+                }
             }
             expression::Tree { name, args } if !name.is_empty() && args.is_empty() => {
                 let script = Miniscript::<Pk, Tap, Ext>::from_str(name)?;
@@ -948,6 +980,8 @@ mod tests {
 
     #[cfg(feature = "simplicity")]
     const INTERNAL_KEY: &str = "020000000000000000000000000000000000000000000000000000000000000001";
+    #[cfg(feature = "simplicity")]
+    const LEAF_KEY: &str = "020000000000000000000000000000000000000000000000000000000000000002";
 
     #[test]
     fn test_for_each() {
@@ -999,35 +1033,15 @@ mod tests {
             "internal",
             &[TapLeafScript::Miniscript(&ms)],
         );
-
-        #[cfg(feature = "simplicity")]
-        {
-            // Simplicity key spend
-            let sim = simplicity::Policy::Key("a".to_string());
-            verify_from_str(
-                "eltr(internal,sim{pk(a)})#duhmnzmm",
-                "internal",
-                &[TapLeafScript::Simplicity(&sim)],
-            );
-
-            // Mixed Miniscript and Simplicity
-            verify_from_str(
-                "eltr(internal,{pk(a),sim{pk(a)}})#7vmfhpaj",
-                "internal",
-                &[
-                    TapLeafScript::Miniscript(&ms),
-                    TapLeafScript::Simplicity(&sim),
-                ],
-            );
-        }
     }
 
     #[test]
     #[cfg(feature = "simplicity")]
     fn simplicity_satisfaction_fails_closed_without_env() {
         let descriptor = Tr::<bitcoin::PublicKey, NoExt>::from_str(&format!(
-            "eltr({},sim{{TRIVIAL}})",
-            INTERNAL_KEY
+            "eltr({},sim{{asm({})}})",
+            INTERNAL_KEY,
+            "11".repeat(32)
         ))
         .expect("valid concrete Taproot descriptor");
         let (_, leaf) = descriptor.iter_scripts().next().unwrap();
@@ -1067,5 +1081,19 @@ mod tests {
                 .to_string(),
             "tex1pv0j8tv5ylastrywdu724xem8zthque7a79d7mpk4wep5yxx5wxzs4xp4za"
         );
+    }
+
+    #[test]
+    #[cfg(feature = "simplicity")]
+    fn ensure_only_simplicity_cmr_desc_supported() {
+        let policy = format!("eltr({},sim{{pk({})}})", INTERNAL_KEY, LEAF_KEY);
+        let error = Tr::<bitcoin::PublicKey, NoExt>::from_str(&policy)
+            .expect_err("compiled policy syntax is not a core descriptor");
+        assert!(error.to_string().contains("only sim{asm(CMR)}"));
+
+        let programmatic = TapTree::SimplicityLeaf(Arc::new(simplicity::Policy::Trivial));
+        let error = Tr::<String, NoExt>::new("internal".to_owned(), Some(programmatic))
+            .expect_err("programmatic policies must follow the same CMR-only boundary");
+        assert!(error.to_string().contains("only sim{asm(CMR)}"));
     }
 }
