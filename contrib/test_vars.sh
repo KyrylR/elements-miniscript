@@ -11,4 +11,4 @@ FEATURES_WITH_STD=""
 FEATURES_WITHOUT_STD="compiler trace serde rand base64 simplicity"
 
 # Run these examples.
-EXAMPLES="htlc:compiler parse: sign_multisig: verify_tx: xpub_descriptors: taproot:compiler psbt_sign_finalize:base64"
+EXAMPLES="htlc:compiler parse: sign_multisig: verify_tx: xpub_descriptors: taproot:compiler psbt_sign_finalize:base64 simplicity_descriptors:simplicity"
