@@ -5,7 +5,7 @@ use elements::secp256k1_zkp::{Secp256k1, XOnlyPublicKey};
 use elements_miniscript::descriptor::Tr;
 use elements_miniscript::policy::Liftable;
 use elements_miniscript::{
-    simplicity_lang as simplicity, ForEachKey, SimplicityLeaf,
+    simplicity_lang as simplicity, Descriptor, DescriptorPublicKey, ForEachKey, SimplicityLeaf,
 };
 use simplicity::Cmr;
 
@@ -93,6 +93,83 @@ fn commitment_vectors_and_analysis() {
 }
 
 #[test]
+fn derivation_and_pset_leaf_versions() {
+    use elements_miniscript::psbt::{PsbtInputExt, PsbtOutputExt};
+    let xpub = "[78412e3a/44'/0'/0']xpub6ERApfZwUNrhLCkDtcHTcxd75RbzS1ed54G1LkBUHQVHQKqhMkhgbmJbZRkrgZw4koxb5JaHWkY4ALHY2grBGRjaDMzQLcgJvLJuZZvRcEL/1/*";
+    let desc =
+        Descriptor::<DescriptorPublicKey>::from_str(&format!("eltr({},sim{{asm({})}})", xpub, CMR))
+            .unwrap();
+    let secp = Secp256k1::new();
+    let d0 = desc.at_derivation_index(0).unwrap();
+    let d1 = desc.at_derivation_index(1).unwrap();
+    let derived = d0.derived_descriptor(&secp).unwrap();
+    assert_ne!(
+        derived.script_pubkey(),
+        d1.derived_descriptor(&secp).unwrap().script_pubkey()
+    );
+    let mut input = elements::pset::Input::default();
+    let mut output = elements::pset::Output::default();
+    input.update_with_descriptor_unchecked(&d0).unwrap();
+    output.update_with_descriptor_unchecked(&d0).unwrap();
+    let (control, (cmr, ver)) = input.tap_scripts.iter().next().unwrap();
+    assert_eq!(ver.as_u8(), 0xbe);
+    assert_eq!(cmr.as_bytes(), Cmr::from_str(CMR).unwrap().as_ref());
+    assert_eq!(control.leaf_version.as_u8(), 0xbe);
+    if let Descriptor::Tr(tr) = d1.derived_descriptor(&secp).unwrap() {
+        assert_eq!(tr.iter_scripts().next().unwrap().1.encode(), *cmr);
+    } else {
+        panic!("taproot expected");
+    }
+    let output_tree = output.tap_tree.as_ref().unwrap();
+    let expected = elements::taproot::TaprootBuilder::new()
+        .add_leaf_with_ver(0, cmr.clone(), *ver)
+        .unwrap();
+    assert_eq!(
+        *output_tree,
+        elements::pset::TapTree::from_inner(expected).unwrap()
+    );
+    if let Descriptor::Tr(tr) = &derived {
+        assert_eq!(input.tap_merkle_root, tr.spend_info().merkle_root());
+    } else {
+        panic!("taproot expected");
+    }
+}
+
+#[test]
+fn generic_pset_finalizer_cannot_infer_simplicity_artifact() {
+    use elements_miniscript::psbt::{Error, InputError, PsbtExt, PsbtInputExt};
+    let desc =
+        Descriptor::<DescriptorPublicKey>::from_str(&format!("eltr({},sim{{asm({})}})", KEY, CMR))
+            .unwrap()
+            .at_derivation_index(0)
+            .unwrap();
+    let secp = Secp256k1::new();
+    let derived = desc.derived_descriptor(&secp).unwrap();
+    let tx = elements::Transaction {
+        version: 2,
+        lock_time: elements::LockTime::ZERO,
+        input: vec![elements::TxIn::default()],
+        output: vec![],
+    };
+    let mut pset = elements::pset::PartiallySignedTransaction::from_tx(tx);
+    pset.inputs_mut()[0].witness_utxo = Some(elements::TxOut {
+        script_pubkey: derived.script_pubkey(),
+        asset: elements::confidential::Asset::Explicit(elements::AssetId::LIQUID_BTC),
+        value: elements::confidential::Value::Explicit(1000),
+        ..elements::TxOut::default()
+    });
+    pset.inputs_mut()[0]
+        .update_with_descriptor_unchecked(&desc)
+        .unwrap();
+    let before = pset.inputs()[0].final_script_witness.clone();
+    assert!(matches!(
+        pset.finalize_inp_mut(&secp, 0, elements::BlockHash::from_byte_array([0; 32])),
+        Err(Error::InputError(InputError::CouldNotSatisfyTr, 0))
+    ));
+    assert_eq!(pset.inputs()[0].final_script_witness, before);
+}
+
+#[test]
 fn reject_nested_leaf_data() {
     for leaf in [
         "sim{pk(a){pk(b),pk(c)}}".to_owned(),
@@ -100,4 +177,34 @@ fn reject_nested_leaf_data() {
     ] {
         assert!(Tr::<String>::from_str(&format!("eltr(internal,{})", leaf)).is_err());
     }
+}
+
+#[test]
+fn interpreter_rejects_simplicity_leaf_version() {
+    let tr = Tr::<XOnlyPublicKey>::from_str(&format!("eltr({},sim{{asm({})}})", KEY, CMR)).unwrap();
+    let (_, leaf) = tr.iter_scripts().next().unwrap();
+    let control = tr
+        .spend_info()
+        .control_block(&(leaf.encode(), leaf.version()))
+        .unwrap();
+    // Metadata is enough to test refusal. This is not a satisfying witness.
+    let witness = vec![
+        vec![],
+        vec![],
+        leaf.encode().into_bytes(),
+        control.serialize(),
+    ];
+    let script_sig = elements::Script::new();
+    let script_pubkey = tr.script_pubkey();
+    let result = elements_miniscript::interpreter::Interpreter::from_txdata(
+        &script_pubkey,
+        &script_sig,
+        &witness,
+        elements::Sequence::ZERO,
+        elements::LockTime::ZERO,
+    );
+    assert!(matches!(
+        result,
+        Err(elements_miniscript::interpreter::Error::UnsupportedTapLeafVersion(0xbe))
+    ));
 }

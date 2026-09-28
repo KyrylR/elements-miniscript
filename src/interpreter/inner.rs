@@ -274,6 +274,13 @@ pub fn from_txdata<'txin, Ext: ParseableExt>(
                     let tap_script = wit_stack.pop().ok_or(Error::UnexpectedStackEnd)?;
                     let ctrl_blk =
                         ControlBlock::from_slice(ctrl_blk).map_err(Error::ControlBlockParse)?;
+                    // The interpreter supports only the default Tapscript leaf version.
+                    // Simplicity leaves hold CMR bytes.
+                    if ctrl_blk.leaf_version != elements::taproot::LeafVersion::default() {
+                        return Err(Error::UnsupportedTapLeafVersion(
+                            ctrl_blk.leaf_version.as_u8(),
+                        ));
+                    }
                     let tap_script = script_from_stack_elem::<Tap, Ext>(&tap_script)?;
                     let ms = tap_script.to_no_checks_ms();
                     // Creating new contexts is cheap

@@ -93,6 +93,8 @@ pub enum Error {
     SighashError(elements::sighash::Error),
     /// Taproot Annex Unsupported
     TapAnnexUnsupported,
+    /// The script path uses a leaf version other than the supported Tapscript version.
+    UnsupportedTapLeafVersion(u8),
     /// An uncompressed public key was encountered in a context where it is
     /// disallowed (e.g. in a Segwit script or p2wpkh output)
     UncompressedPubkey,
@@ -184,6 +186,9 @@ impl fmt::Display for Error {
             Error::Secp(ref e) => fmt::Display::fmt(e, f),
             Error::SchnorrSig(ref s) => write!(f, "Schnorr sig error: {}", s),
             Error::SighashError(ref e) => fmt::Display::fmt(e, f),
+            Error::UnsupportedTapLeafVersion(v) => {
+                write!(f, "Unsupported Taproot leaf version: {:#x}", v)
+            }
             Error::TapAnnexUnsupported => f.write_str("Encountered annex element"),
             Error::UncompressedPubkey => {
                 f.write_str("uncompressed pubkey in non-legacy descriptor")
@@ -221,6 +226,7 @@ impl error::Error for Error {
         match self {
             AbsoluteLocktimeNotMet(_)
             | AbsoluteLocktimeComparisonInvalid(_, _)
+            | UnsupportedTapLeafVersion(_)
             | CannotInferTrDescriptors
             | ControlBlockVerificationError
             | CouldNotEvaluate
