@@ -57,6 +57,8 @@ pub enum LiftError {
     BranchExceedResourceLimits,
     /// Cannot lift raw descriptors
     RawDescriptorLift,
+    /// A semantic policy cannot be recovered from a Simplicity program commitment.
+    SimplicityLift,
 }
 
 impl fmt::Display for LiftError {
@@ -68,6 +70,7 @@ impl fmt::Display for LiftError {
             LiftError::BranchExceedResourceLimits => f.write_str(
                 "Cannot lift policies containing one branch that exceeds resource limits",
             ),
+            LiftError::SimplicityLift => f.write_str("Cannot lift Simplicity leaves"),
             LiftError::RawDescriptorLift => f.write_str("Cannot lift raw descriptors"),
         }
     }
@@ -78,7 +81,10 @@ impl error::Error for LiftError {
         use self::LiftError::*;
 
         match self {
-            HeightTimelockCombination | BranchExceedResourceLimits | RawDescriptorLift => None,
+            HeightTimelockCombination
+            | BranchExceedResourceLimits
+            | RawDescriptorLift
+            | SimplicityLift => None,
         }
     }
 }

@@ -139,6 +139,8 @@ pub enum AnalysisError {
     Malleable,
     /// Contains partial descriptor raw pkh
     ContainsRawPkh,
+    /// A Simplicity CMR does not expose the program needed for safety or witness-size analysis.
+    SimplicityUnsupported,
 }
 
 impl fmt::Display for AnalysisError {
@@ -157,6 +159,9 @@ impl fmt::Display for AnalysisError {
                 f.write_str("Contains a combination of heightlock and timelock")
             }
             AnalysisError::Malleable => f.write_str("Miniscript is malleable"),
+            AnalysisError::SimplicityUnsupported => {
+                f.write_str("Simplicity safety analysis and witness bounds are unavailable")
+            }
             AnalysisError::ContainsRawPkh => f.write_str("Miniscript contains raw pkh"),
         }
     }
@@ -172,7 +177,8 @@ impl error::Error for AnalysisError {
             | BranchExceedResouceLimits
             | HeightTimelockCombination
             | Malleable
-            | ContainsRawPkh => None,
+            | ContainsRawPkh
+            | SimplicityUnsupported => None,
         }
     }
 }

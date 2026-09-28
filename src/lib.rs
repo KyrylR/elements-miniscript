@@ -136,6 +136,12 @@ pub mod psbt;
 
 #[cfg(feature = "simplicity")]
 mod simplicity;
+#[cfg(feature = "simplicity")]
+pub use crate::simplicity::SimplicityLeaf;
+/// Re-export of the `simplicity-lang` crate, including [`simplicity_lang::Cmr`]
+/// for constructing [`SimplicityLeaf`] values without a separate dependency.
+#[cfg(feature = "simplicity")]
+pub extern crate simplicity as simplicity_lang;
 #[cfg(test)]
 mod test_utils;
 mod util;

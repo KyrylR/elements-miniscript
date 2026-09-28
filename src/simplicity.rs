@@ -1,178 +1,47 @@
 // SPDX-License-Identifier: CC0-1.0
 use std::fmt;
 use std::str::FromStr;
-use std::sync::Arc;
 
-use simplicity::{FailEntropy, Policy};
+use simplicity::Cmr;
 
-use crate::policy::concrete::PolicyError;
-use crate::{expression, Error, MiniscriptKey};
+use crate::Error;
 
-impl_from_tree!(
-    Policy<Pk>,
-    fn from_tree(top: &expression::Tree) -> Result<Self, Error> {
-        match (top.name, top.args.len() as u32) {
-            ("UNSATISFIABLE", 0) => Ok(Policy::Unsatisfiable(FailEntropy::ZERO)),
-            ("TRIVIAL", 0) => Ok(Policy::Trivial),
-            ("pk", 1) => expression::terminal(&top.args[0], |pk| Pk::from_str(pk).map(Policy::Key)),
-            ("after", 1) => expression::terminal(&top.args[0], |x| {
-                expression::parse_num(x).map(Policy::After)
-            }),
-            ("older", 1) => expression::terminal(&top.args[0], |x| {
-                expression::parse_num(x).map(Policy::Older)
-            }),
-            ("sha256", 1) => expression::terminal(&top.args[0], |x| {
-                Pk::Sha256::from_str(x).map(Policy::Sha256)
-            }),
-            ("and", _) => {
-                if top.args.len() != 2 {
-                    return Err(Error::PolicyError(PolicyError::NonBinaryArgAnd));
-                }
-                let left = Arc::new(Policy::from_tree(&top.args[0])?);
-                let right = Arc::new(Policy::from_tree(&top.args[0])?);
-                Ok(Policy::And { left, right })
-            }
-            ("or", _) => {
-                if top.args.len() != 2 {
-                    return Err(Error::PolicyError(PolicyError::NonBinaryArgOr));
-                }
-                let left = Arc::new(Policy::from_tree(&top.args[0])?);
-                let right = Arc::new(Policy::from_tree(&top.args[0])?);
-                Ok(Policy::Or { left, right })
-            }
-            ("thresh", nsubs) => {
-                if nsubs == 0 {
-                    return Err(Error::Unexpected("thresh without args".to_owned()));
-                }
-                if nsubs < 3 {
-                    return Err(Error::Unexpected(
-                        "thresh must have a threshold value and at least 2 children".to_owned(),
-                    ));
-                }
-                if !top.args[0].args.is_empty() {
-                    return Err(Error::Unexpected(top.args[0].args[0].name.to_owned()));
-                }
+/// A Simplicity program commitment used as a Taproot leaf.
+///
+/// Displayed as `sim{asm(CMR)}`. The CMR does not expose the program, its keys or
+/// its spending conditions. Callers must retain the program separately.
+/// Constructing or parsing a leaf does not validate the program or its witness.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, std::hash::Hash)]
+pub struct SimplicityLeaf(Cmr);
 
-                let thresh: u32 = expression::parse_num(top.args[0].name)?;
-                if thresh >= nsubs {
-                    return Err(Error::Unexpected(top.args[0].name.to_owned()));
-                }
-
-                let mut subs = Vec::with_capacity(top.args.len() - 1);
-                for arg in &top.args[1..] {
-                    subs.push(Policy::from_tree(arg)?);
-                }
-                Ok(Policy::Threshold(thresh as usize, subs))
-            }
-            _ => Err(Error::Unexpected(top.name.to_owned())),
-        }
+impl SimplicityLeaf {
+    /// Construct a commitment-only leaf without validating a program.
+    pub fn from_cmr(cmr: Cmr) -> Self {
+        Self(cmr)
     }
-);
 
-// We cannot implement FromStr for Policy<Pk> because neither is defined in this crate
-// Use a crate-local wrapper type to avoid code repetition
-// Users use `Tr` / `Descriptor` and never encounter this wrapper
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, std::hash::Hash)]
-pub(crate) struct PolicyWrapper<Pk: MiniscriptKey>(pub Policy<Pk>);
-
-impl<Pk: MiniscriptKey> fmt::Debug for PolicyWrapper<Pk> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fmt::Debug::fmt(&self.0, f)
+    /// Return the program commitment.
+    pub fn cmr(&self) -> Cmr {
+        self.0
     }
 }
 
-impl_from_str!(
-    PolicyWrapper<Pk>,
-    type Err = Error;,
+impl fmt::Display for SimplicityLeaf {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "sim{{asm({})}}", self.0)
+    }
+}
+
+impl FromStr for SimplicityLeaf {
+    type Err = Error;
+
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let tree = expression::Tree::from_str(s)?;
-        <Policy<Pk> as expression::FromTree>::from_tree(&tree).map(PolicyWrapper)
-    }
-);
-
-// We cannot implement ForEachKey for Policy<Pk> because it is not defined in this crate
-// We cannot use our wrapper because we don't own the Policy (we have a reference)
-// Implementing a wrapper of Cow<'a, Policy<Pk>> leads to lifetime issues
-// when implementing ForEachKey, because for_each_key() has its own lifetime 'a
-pub fn for_each_key<'a, Pk: MiniscriptKey + 'a, F: FnMut(&'a Pk) -> bool>(policy: &'a Policy<Pk>, mut pred: F) -> bool
-{
-    let mut stack = vec![policy];
-
-    while let Some(top) = stack.pop() {
-        match top {
-            Policy::Key(key) => {
-                if !pred(key) {
-                    return false;
-                }
-            }
-            Policy::And { left, right } | Policy::Or { left, right } => {
-                stack.push(right);
-                stack.push(left);
-            }
-            Policy::Threshold(_, sub_policies) => {
-                stack.extend(sub_policies.iter());
-            }
-            _ => {}
-        }
-    }
-
-    true
-}
-
-#[cfg(test)]
-mod tests {
-    use secp256k1::XOnlyPublicKey;
-    use crate::DescriptorPublicKey;
-    use super::*;
-
-    #[test]
-    fn parse_bad_thresh() {
-        assert_eq!(
-            PolicyWrapper::<XOnlyPublicKey>::from_str("thresh()"),
-            Err(Error::Unexpected(
-                "thresh must have a threshold value and at least 2 children".to_string()
-            )),
-        );
-
-        assert_eq!(
-            PolicyWrapper::<XOnlyPublicKey>::from_str("thresh"),
-            Err(Error::Unexpected("thresh without args".to_string())),
-        );
-
-        assert_eq!(
-            PolicyWrapper::<XOnlyPublicKey>::from_str("thresh(0)"),
-            Err(Error::Unexpected(
-                "thresh must have a threshold value and at least 2 children".to_string()
-            )),
-        );
-
-        assert_eq!(
-            PolicyWrapper::<XOnlyPublicKey>::from_str("thresh(0,TRIVIAL)"),
-            Err(Error::Unexpected(
-                "thresh must have a threshold value and at least 2 children".to_string()
-            )),
-        );
-
-        assert!(PolicyWrapper::<XOnlyPublicKey>::from_str("thresh(0,TRIVIAL,TRIVIAL)").is_ok());
-        assert!(PolicyWrapper::<XOnlyPublicKey>::from_str("thresh(2,TRIVIAL,TRIVIAL)").is_ok());
-
-        assert_eq!(
-            PolicyWrapper::<XOnlyPublicKey>::from_str("thresh(3,TRIVIAL,TRIVIAL)"),
-            Err(Error::Unexpected("3".to_string())),
-        );
-    }
-
-    #[test]
-    fn decode_xpub() {
-        let s = "[78412e3a/44'/0'/0']xpub6ERApfZwUNrhLCkDtcHTcxd75RbzS1ed54G1LkBUHQVHQKqhMkhgbmJbZRkrgZw4koxb5JaHWkY4ALHY2grBGRjaDMzQLcgJvLJuZZvRcEL/1/*";
-        let decoded_key = DescriptorPublicKey::from_str(s).expect("constant key");
-        let s = format!("pk({})", s);
-        let decoded_policy = PolicyWrapper::<DescriptorPublicKey>::from_str(&s).expect("decode policy").0;
-
-        if let Policy::Key(key) = decoded_policy {
-            assert_eq!(decoded_key, key);
-        } else {
-            panic!("Decoded policy should be public key")
-        }
+        let cmr = s
+            .strip_prefix("sim{asm(")
+            .and_then(|s| s.strip_suffix(")}"))
+            .ok_or_else(|| Error::Unexpected("expected sim{asm(CMR)}".into()))?;
+        Cmr::from_str(cmr)
+            .map(Self::from_cmr)
+            .map_err(|e| Error::Unexpected(e.to_string()))
     }
 }
