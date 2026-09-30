@@ -1306,7 +1306,7 @@ where
         let leaf_script = (script_derived.encode(), script.version());
         let tapleaf_hash = TapLeafHash::from_script(&leaf_script.0, leaf_script.1);
         builder = builder
-            .add_leaf(depth, leaf_script.0.clone())
+            .add_leaf_with_ver(depth, leaf_script.0.clone(), leaf_script.1)
             .expect("Computing spend data on a valid tree should always succeed");
         if let Some(tap_scripts) = item.tap_scripts() {
             let control_block = spend_info

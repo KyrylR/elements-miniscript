@@ -63,6 +63,10 @@ required-features = ["compiler"]
 name = "psbt_sign_finalize"
 required-features = ["base64"]
 
+[[example]]
+name = "simplicity_descriptors"
+required-features = ["simplicity"]
+
 [workspace]
 members = ["bitcoind-tests", "fuzz"]
 

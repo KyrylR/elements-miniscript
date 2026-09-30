@@ -29,6 +29,48 @@ coins in a given Bitcoin transaction
 More information can be found in [the documentation](https://docs.rs/elements-miniscript)
 or in [the `examples/` directory](https://github.com/ElementsProject/elements-miniscript/tree/master/examples)
 
+## Simplicity descriptors
+
+Enable the `simplicity` feature to use `eltr(KEY,sim{asm(CMR)})`, including
+mixed Miniscript/Simplicity trees. CMR is a 32-byte commitment Merkle root written
+as 64 hexadecimal characters. The descriptor stores the commitment. Retain the
+matching program separately because it is needed to spend the output. Parsing
+accepts uppercase hex and display normalizes it to lowercase, which can change
+the descriptor checksum.
+
+Use a CMR descriptor to derive addresses and control blocks.
+`PsbtExt::update_input_with_descriptor`, `update_output_with_descriptor` and the
+`update_with_descriptor_unchecked` methods on PSET inputs and outputs populate
+metadata with Simplicity's `0xbe` leaf version. `SimplicityLeaf::from_cmr`
+constructs a leaf from a CMR. The crate re-exports `simplicity-lang`, including its `Cmr` type, as
+`elements_miniscript::simplicity_lang`. Accepting a CMR does not validate its
+program or establish that it can be spent.
+
+A CMR does not reveal the program's keys. Key iteration skips CMR leaves, and
+key derivation leaves their commitments unchanged. A successful `for_each_key`
+predicate therefore says nothing about keys used by the committed program.
+Likewise, `for_any_key` returning false does not rule out a matching key in that
+program. The descriptor's internal key and Miniscript leaves still support
+derivation.
+
+Policy forms such as `sim{pk(KEY)}` are rejected. For an existing output, use the
+CMR recorded when it was created or computed from its original program.
+
+Run the offline address and metadata example:
+
+```sh
+cargo run --features simplicity --example simplicity_descriptors
+```
+
+The crate does not construct Simplicity witnesses. Generic satisfaction skips
+Simplicity leaves in mixed trees, and PSET signing and finalization do not support
+Simplicity script paths. The Miniscript interpreter and `PsbtExt::extract` reject
+Simplicity script-path witnesses. `Tr::sanity_check`, `Tr::max_weight_to_satisfy`
+and `Tr::max_satisfaction_weight` return errors for trees containing Simplicity.
+`TapLeafScript::max_satisfaction_size` cannot bound witness bytes from a CMR and
+also returns an error. Semantic lifting fails because the CMR does not expose
+the spending conditions.
+
 ## Building
 
 The cargo feature `std` is enabled by default. At least one of the features `std` or `no-std` or both must be enabled.
