@@ -409,7 +409,7 @@ mod tests {
             let descriptor = policy.compile_tr(Some(unspendable_key.clone())).unwrap();
 
             let ms_compilation: Miniscript<String, Tap> = ms_str!("multi_a(2,A,B,C,D)");
-            let tree: TapTree<String> = TapTree::Leaf(Arc::new(ms_compilation));
+            let tree: TapTree<String> = TapTree::leaf(ms_compilation);
             let expected_descriptor =
                 Descriptor::new_tr(unspendable_key.clone(), Some(tree)).unwrap();
             assert_eq!(descriptor, expected_descriptor);
@@ -424,9 +424,9 @@ mod tests {
                 Arc::new(ms_str!("and_v(v:pk(C),pk(D))"));
             let right_ms_compilation: Arc<Miniscript<String, Tap>> =
                 Arc::new(ms_str!("and_v(v:pk(A),pk(B))"));
-            let left_node: Arc<TapTree<String>> = Arc::from(TapTree::Leaf(left_ms_compilation));
-            let right_node: Arc<TapTree<String>> = Arc::from(TapTree::Leaf(right_ms_compilation));
-            let tree: TapTree<String> = TapTree::Tree(left_node, right_node);
+            let left = TapTree::leaf(left_ms_compilation);
+            let right = TapTree::leaf(right_ms_compilation);
+            let tree: TapTree<String> = TapTree::combine(left, right).unwrap();
             let expected_descriptor =
                 Descriptor::new_tr(unspendable_key.clone(), Some(tree)).unwrap();
             assert_eq!(descriptor, expected_descriptor);
@@ -441,6 +441,20 @@ mod tests {
                 descriptor.unwrap_err().to_string(),
                 "Policy contains duplicate keys"
             );
+        }
+
+        // A subtree goes to the left of a leaf of equal probability
+        {
+            let policy: Concrete<String> =
+                policy_str!("or(and(pk(A),pk(B)),or(and(pk(C),pk(D)),and(pk(E),pk(F))))");
+            let descriptor = policy.compile_tr(Some(unspendable_key.clone())).unwrap();
+            let expected_descriptor = Descriptor::Tr(
+                Tr::<String>::from_str(
+                    "eltr(UNSPENDABLE,{{and_v(v:pk(E),pk(F)),and_v(v:pk(C),pk(D))},and_v(v:pk(A),pk(B))})",
+                )
+                .unwrap(),
+            );
+            assert_eq!(descriptor, expected_descriptor);
         }
 
         // Non-trivial multi-node compilation
@@ -489,27 +503,29 @@ mod tests {
                 .into_iter()
                 .map(|x| {
                     let leaf_policy: Concrete<String> = policy_str!("{}", x);
-                    TapTree::Leaf(Arc::from(leaf_policy.compile::<Tap>().unwrap()))
+                    TapTree::leaf(leaf_policy.compile::<Tap>().unwrap())
                 })
                 .collect::<Vec<_>>();
 
             // Arrange leaf compilations (acc. to probabilities) using huffman encoding into a TapTree
-            let tree = TapTree::Tree(
-                Arc::from(TapTree::Tree(
-                    Arc::from(node_compilations[4].clone()),
-                    Arc::from(node_compilations[5].clone()),
-                )),
-                Arc::from(TapTree::Tree(
-                    Arc::from(TapTree::Tree(
-                        Arc::from(TapTree::Tree(
-                            Arc::from(node_compilations[0].clone()),
-                            Arc::from(node_compilations[1].clone()),
-                        )),
-                        Arc::from(node_compilations[3].clone()),
-                    )),
-                    Arc::from(node_compilations[6].clone()),
-                )),
-            );
+            let tree = TapTree::combine(
+                TapTree::combine(node_compilations[4].clone(), node_compilations[5].clone())
+                    .unwrap(),
+                TapTree::combine(
+                    TapTree::combine(
+                        TapTree::combine(
+                            node_compilations[0].clone(),
+                            node_compilations[1].clone(),
+                        )
+                        .unwrap(),
+                        node_compilations[3].clone(),
+                    )
+                    .unwrap(),
+                    node_compilations[6].clone(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
 
             let expected_descriptor = Descriptor::new_tr("E".to_string(), Some(tree)).unwrap();
             assert_eq!(descriptor, expected_descriptor);

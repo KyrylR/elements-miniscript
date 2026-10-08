@@ -56,7 +56,7 @@ pub use self::key::{
     DescriptorMultiXKey, DescriptorPublicKey, DescriptorSecretKey, DescriptorXKey, InnerXKey,
     SinglePriv, SinglePub, SinglePubKey, Wildcard,
 };
-pub use self::tr::{TapLeafScript, TapTree, Tr};
+pub use self::tr::{TapTree, TapTreeDepthError, TapTreeIter, TapTreeIterItem, Tr};
 /// Alias type for a map of public key to secret key
 ///
 /// This map is returned whenever a descriptor that contains secrets is parsed using
@@ -397,14 +397,12 @@ impl<Pk: MiniscriptKey, Ext: Extension> Descriptor<Pk, Ext> {
         Ok(Descriptor::Wsh(Wsh::new_sortedmulti(k, pks)?))
     }
 
-    /// Create new tr descriptor
-    /// Errors when miniscript exceeds resource limits under Tap context
+    /// Create a new Taproot descriptor.
     pub fn new_tr(key: Pk, script: Option<tr::TapTree<Pk, NoExt>>) -> Result<Self, Error> {
         Ok(Descriptor::Tr(Tr::new(key, script)?))
     }
 
-    /// Create new tr descriptor
-    /// Errors when miniscript exceeds resource limits under Tap context
+    /// Create a new Taproot descriptor.
     pub fn new_tr_ext(key: Pk, script: Option<tr::TapTree<Pk, Ext>>) -> Result<Self, Error> {
         Ok(Descriptor::TrExt(Tr::new(key, script)?))
     }

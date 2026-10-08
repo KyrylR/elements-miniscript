@@ -5,7 +5,6 @@ use std::str::FromStr;
 
 use bitcoin::WitnessVersion;
 use miniscript::descriptor::DescriptorType;
-use miniscript::descriptor::TapLeafScript;
 use miniscript::policy::Concrete;
 use miniscript::{
     translate_hash_fail, Descriptor, Miniscript, NoExt, Tap, TranslatePk, Translator,
@@ -66,25 +65,18 @@ fn main() {
         assert_eq!(p.internal_key(), "Ca");
 
         // Iterate through scripts
-        let mut iter = p.iter_scripts();
+        let mut iter = p.leaves();
+        let leaf = iter.next().unwrap();
+        assert_eq!(leaf.depth(), 1);
         assert_eq!(
-            iter.next().unwrap(),
-            (
-                1,
-                TapLeafScript::Miniscript(
-                    &Miniscript::<String, Tap, NoExt>::from_str("and_v(vc:pk_k(In),older(9))")
-                        .unwrap()
-                )
-            )
+            **leaf.miniscript(),
+            Miniscript::<String, Tap, NoExt>::from_str("and_v(vc:pk_k(In),older(9))").unwrap()
         );
+        let leaf = iter.next().unwrap();
+        assert_eq!(leaf.depth(), 1);
         assert_eq!(
-            iter.next().unwrap(),
-            (
-                1,
-                TapLeafScript::Miniscript(
-                    &Miniscript::<String, Tap, NoExt>::from_str("multi_a(2,hA,S)").unwrap()
-                )
-            )
+            **leaf.miniscript(),
+            Miniscript::<String, Tap, NoExt>::from_str("multi_a(2,hA,S)").unwrap()
         );
         assert_eq!(iter.next(), None);
     }

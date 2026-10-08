@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: CC0-1.0
-use std::cmp::{self, max};
+
 use std::sync::{Arc, Mutex};
-use std::{fmt, hash};
+use std::{cmp, fmt, hash};
 
 use elements::taproot::{
-    LeafVersion, TaprootBuilder, TaprootSpendInfo, TAPROOT_CONTROL_BASE_SIZE,
-    TAPROOT_CONTROL_MAX_NODE_COUNT, TAPROOT_CONTROL_NODE_SIZE,
+    TaprootBuilder, TaprootSpendInfo, TAPROOT_CONTROL_BASE_SIZE, TAPROOT_CONTROL_NODE_SIZE,
 };
 use elements::{self, opcodes, secp256k1_zkp, Script};
 
@@ -20,46 +19,26 @@ use crate::policy::semantic::Policy;
 use crate::policy::Liftable;
 use crate::util::{varint_len, witness_size};
 use crate::{
-    Error, Extension, ForEachKey, MiniscriptKey, NoExt, Satisfier, Tap, ToPublicKey, TranslateExt,
-    TranslatePk, Translator,
+    Error, ExtTranslator, Extension, ForEachKey, MiniscriptKey, NoExt, Satisfier, Tap, ToPublicKey,
+    TranslateExt, TranslatePk, Translator,
 };
 
-/// A Taproot Tree representation.
-// Hidden leaves are not yet supported in descriptor spec. Conceptually, it should
-// be simple to integrate those here, but it is best to wait on core for the exact syntax.
-#[derive(Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
-#[non_exhaustive]
-pub enum TapTree<Pk: MiniscriptKey, Ext: Extension = NoExt> {
-    /// A taproot tree structure
-    Tree(Arc<TapTree<Pk, Ext>>, Arc<TapTree<Pk, Ext>>),
-    /// A taproot leaf denoting a spending condition
-    // A new leaf version would require a new Context, therefore there is no point
-    // in adding a LeafVersion with Leaf type here. All Miniscripts right now
-    // are of Leafversion::default
-    Leaf(Arc<Miniscript<Pk, Tap, Ext>>),
-}
+mod taptree;
+
+pub use self::taptree::{TapTree, TapTreeDepthError, TapTreeIter, TapTreeIterItem};
 
 /// A taproot descriptor
 pub struct Tr<Pk: MiniscriptKey, Ext: Extension = NoExt> {
-    /// A taproot internal key
     internal_key: Pk,
-    /// Optional Taproot Tree with spending conditions
     tree: Option<TapTree<Pk, Ext>>,
-    /// Optional spending information associated with the descriptor
-    /// This will be [`None`] when the descriptor is not derived.
-    /// This information will be cached automatically when it is required
-    //
     // The inner `Arc` here is because Rust does not allow us to return a reference
     // to the contents of the `Option` from inside a `MutexGuard`. There is no outer
-    // `Arc` because when this structure is cloned, we create a whole new mutex.
+    // `Arc` because each clone gets its own mutex, so clones don't block each other.
     spend_info: Mutex<Option<Arc<TaprootSpendInfo>>>,
 }
 
 impl<Pk: MiniscriptKey, Ext: Extension> Clone for Tr<Pk, Ext> {
     fn clone(&self) -> Self {
-        // When cloning, construct a new Mutex so that distinct clones don't
-        // cause blocking between each other. We clone only the internal `Arc`,
-        // so the clone is always cheap (in both time and space)
         Self {
             internal_key: self.internal_key.clone(),
             tree: self.tree.clone(),
@@ -105,94 +84,14 @@ impl<Pk: MiniscriptKey, Ext: Extension> hash::Hash for Tr<Pk, Ext> {
     }
 }
 
-impl<Pk: MiniscriptKey, Ext: Extension> TapTree<Pk, Ext> {
-    // Helper function to compute height
-    // TODO: Instead of computing this every time we add a new leaf, we should
-    // add height as a separate field in taptree
-    fn taptree_height(&self) -> usize {
-        match *self {
-            TapTree::Tree(ref left_tree, ref right_tree) => {
-                1 + max(left_tree.taptree_height(), right_tree.taptree_height())
-            }
-            TapTree::Leaf(..) => 0,
-        }
-    }
-
-    /// Iterates over all miniscripts in DFS walk order compatible with the
-    /// PSBT requirements (BIP 371).
-    pub fn iter(&self) -> TapTreeIter<'_, Pk, Ext> {
-        TapTreeIter {
-            stack: vec![(0, self)],
-        }
-    }
-
-    // Helper function to translate keys
-    fn translate_helper<T, Q, Error>(&self, t: &mut T) -> Result<TapTree<Q, Ext>, Error>
-    where
-        T: Translator<Pk, Q, Error>,
-        Q: MiniscriptKey,
-        Ext: Extension,
-    {
-        let frag = match self {
-            TapTree::Tree(l, r) => TapTree::Tree(
-                Arc::new(l.translate_helper(t)?),
-                Arc::new(r.translate_helper(t)?),
-            ),
-            TapTree::Leaf(ms) => TapTree::Leaf(Arc::new(ms.translate_pk(t)?)),
-        };
-        Ok(frag)
-    }
-
-    // Helper function to translate extensions
-    fn translate_ext_helper<T, QExt, Error>(&self, t: &mut T) -> Result<TapTree<Pk, QExt>, Error>
-    where
-        T: crate::ExtTranslator<Ext, QExt, Error>,
-        QExt: Extension,
-        Ext: Extension + TranslateExt<Ext, QExt, Output = QExt>,
-    {
-        let frag = match self {
-            TapTree::Tree(l, r) => TapTree::Tree(
-                Arc::new(l.translate_ext_helper(t)?),
-                Arc::new(r.translate_ext_helper(t)?),
-            ),
-            TapTree::Leaf(ms) => TapTree::Leaf(Arc::new(ms.translate_ext(t)?)),
-        };
-        Ok(frag)
-    }
-}
-
-impl<Pk: MiniscriptKey, Ext: Extension> fmt::Display for TapTree<Pk, Ext> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            TapTree::Tree(ref left, ref right) => write!(f, "{{{},{}}}", *left, *right),
-            TapTree::Leaf(ref script) => write!(f, "{}", *script),
-        }
-    }
-}
-
-impl<Pk: MiniscriptKey, Ext: Extension> fmt::Debug for TapTree<Pk, Ext> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            TapTree::Tree(ref left, ref right) => write!(f, "{{{:?},{:?}}}", *left, *right),
-            TapTree::Leaf(ref script) => write!(f, "{:?}", *script),
-        }
-    }
-}
-
 impl<Pk: MiniscriptKey, Ext: Extension> Tr<Pk, Ext> {
     /// Create a new [`Tr`] descriptor from internal key and [`TapTree`]
     pub fn new(internal_key: Pk, tree: Option<TapTree<Pk, Ext>>) -> Result<Self, Error> {
-        let nodes = tree.as_ref().map(|t| t.taptree_height()).unwrap_or(0);
-
-        if nodes <= TAPROOT_CONTROL_MAX_NODE_COUNT {
-            Ok(Self {
-                internal_key,
-                tree,
-                spend_info: Mutex::new(None),
-            })
-        } else {
-            Err(Error::MaxRecursiveDepthExceeded)
-        }
+        Ok(Self {
+            internal_key,
+            tree,
+            spend_info: Mutex::new(None),
+        })
     }
 
     /// Obtain the internal key of [`Tr`] descriptor
@@ -201,24 +100,31 @@ impl<Pk: MiniscriptKey, Ext: Extension> Tr<Pk, Ext> {
     }
 
     /// Obtain the [`TapTree`] of the [`Tr`] descriptor
-    pub fn taptree(&self) -> &Option<TapTree<Pk, Ext>> {
-        &self.tree
+    pub fn tap_tree(&self) -> Option<&TapTree<Pk, Ext>> {
+        self.tree.as_ref()
     }
 
-    /// Iterate over all scripts in merkle tree. If there is no script path, the iterator
-    /// yields [`None`]
-    pub fn iter_scripts(&self) -> TapTreeIter<'_, Pk, Ext> {
+    /// Iterates over all the leaves of the tree in depth-first preorder.
+    ///
+    /// The yielded elements include the Miniscript for each leaf as well as its depth
+    /// in the tree, which is the data required by PSET.
+    pub fn leaves(&self) -> TapTreeIter<'_, Pk, Ext> {
         match self.tree {
-            Some(ref t) => t.iter(),
-            None => TapTreeIter { stack: vec![] },
+            Some(ref t) => t.leaves(),
+            None => TapTreeIter::empty(),
         }
     }
 
-    /// Compute the [`TaprootSpendInfo`] associated with this descriptor if spend data is `None`.
+    /// Obtain the spending information for this [`Tr`].
     ///
-    /// If spend data is already computed (i.e it is not `None`), this does not recompute it.
+    /// The first time this method is called, it computes the full Taproot Merkle tree of
+    /// all branches as well as the output key which appears on-chain. This is fairly
+    /// expensive since it requires hashing every branch and then doing an elliptic curve
+    /// operation. The result is cached and reused on subsequent calls.
     ///
-    /// [`TaprootSpendInfo`] is only required for spending via the script paths.
+    /// This data is needed to compute the Taproot output, so this method is implicitly
+    /// called through [`Self::script_pubkey`], [`Self::address`], etc. It is also needed
+    /// to compute the hash needed to sign the output.
     pub fn spend_info(&self) -> Arc<TaprootSpendInfo>
     where
         Pk: ToPublicKey,
@@ -240,9 +146,13 @@ impl<Pk: MiniscriptKey, Ext: Extension> Tr<Pk, Ext> {
             TaprootSpendInfo::new_key_spend(&secp, self.internal_key.to_x_only_pubkey(), None)
         } else {
             let mut builder = TaprootBuilder::new();
-            for (depth, script) in self.iter_scripts() {
+            for leaf in self.leaves() {
                 builder = builder
-                    .add_leaf_with_ver(depth, script.encode(), script.version())
+                    .add_leaf_with_ver(
+                        usize::from(leaf.depth()),
+                        leaf.compute_script(),
+                        leaf.leaf_version(),
+                    )
                     .expect("Computing spend data on a valid Tree should always succeed");
             }
             // Assert builder cannot error here because we have a well formed descriptor
@@ -258,10 +168,8 @@ impl<Pk: MiniscriptKey, Ext: Extension> Tr<Pk, Ext> {
 
     /// Checks whether the descriptor is safe.
     pub fn sanity_check(&self) -> Result<(), Error> {
-        for (_depth, script) in self.iter_scripts() {
-            match script {
-                TapLeafScript::Miniscript(ms) => ms.sanity_check()?,
-            }
+        for leaf in self.leaves() {
+            leaf.miniscript().sanity_check()?;
         }
         Ok(())
     }
@@ -275,7 +183,7 @@ impl<Pk: MiniscriptKey, Ext: Extension> Tr<Pk, Ext> {
     /// # Errors
     /// When the descriptor is impossible to safisfy (ex: sh(OP_FALSE)).
     pub fn max_weight_to_satisfy(&self) -> Result<usize, Error> {
-        let tree = match self.taptree() {
+        let tree = match self.tap_tree() {
             None => {
                 // key spend path
                 // item: varint(sig+sigHash) + <sig(64)+sigHash(1)>
@@ -289,12 +197,12 @@ impl<Pk: MiniscriptKey, Ext: Extension> Tr<Pk, Ext> {
             Some(tree) => tree,
         };
 
-        tree.iter()
-            .filter_map(|(depth, script)| {
-                let script_size = script.script_size();
-                let max_sat_elems = script.max_satisfaction_witness_elements().ok()?;
-                let max_sat_size = script.max_satisfaction_size().ok()?;
-                let control_block_size = control_block_len(depth);
+        tree.leaves()
+            .filter_map(|leaf| {
+                let script_size = leaf.miniscript().script_size();
+                let max_sat_elems = leaf.miniscript().max_satisfaction_witness_elements().ok()?;
+                let max_sat_size = leaf.miniscript().max_satisfaction_size().ok()?;
+                let control_block_size = control_block_len(leaf.depth());
 
                 // stack varint difference (+1 for ctrl block, witness script already included)
                 let stack_varint_diff = varint_len(max_sat_elems + 1) - varint_len(0);
@@ -326,7 +234,7 @@ impl<Pk: MiniscriptKey, Ext: Extension> Tr<Pk, Ext> {
     /// When the descriptor is impossible to safisfy (ex: sh(OP_FALSE)).
     #[deprecated(note = "use max_weight_to_satisfy instead")]
     pub fn max_satisfaction_weight(&self) -> Result<usize, Error> {
-        let tree = match self.taptree() {
+        let tree = match self.tap_tree() {
             // key spend path:
             // scriptSigLen(4) + stackLen(1) + stack[Sig]Len(1) + stack[Sig](65)
             None => return Ok(4 + 1 + 1 + 65),
@@ -334,12 +242,12 @@ impl<Pk: MiniscriptKey, Ext: Extension> Tr<Pk, Ext> {
             Some(tree) => tree,
         };
 
-        tree.iter()
-            .filter_map(|(depth, script)| {
-                let script_size = script.script_size();
-                let max_sat_elems = script.max_satisfaction_witness_elements().ok()?;
-                let max_sat_size = script.max_satisfaction_size().ok()?;
-                let control_block_size = control_block_len(depth);
+        tree.leaves()
+            .filter_map(|leaf| {
+                let script_size = leaf.miniscript().script_size();
+                let max_sat_elems = leaf.miniscript().max_satisfaction_witness_elements().ok()?;
+                let max_sat_size = leaf.miniscript().max_satisfaction_size().ok()?;
+                let control_block_size = control_block_len(leaf.depth());
                 Some(
                     // scriptSig len byte
                     4 +
@@ -402,180 +310,41 @@ impl<Pk: MiniscriptKey + ToPublicKey, Ext: ParseableExt> Tr<Pk, Ext> {
     }
 }
 
-/// Script at a tap leaf.
-#[derive(Copy, Clone, Debug, Ord, PartialOrd, Eq, PartialEq, Hash)]
-#[non_exhaustive]
-pub enum TapLeafScript<'a, Pk: MiniscriptKey, Ext: Extension> {
-    /// Miniscript leaf
-    Miniscript(&'a Miniscript<Pk, Tap, Ext>),
-}
-
-impl<'a, Pk: MiniscriptKey, Ext: Extension> TapLeafScript<'a, Pk, Ext> {
-    /// Get the Miniscript at the leaf, if it exists.
-    pub fn as_miniscript(&self) -> Option<&'a Miniscript<Pk, Tap, Ext>> {
-        match self {
-            TapLeafScript::Miniscript(ms) => Some(ms),
-        }
-    }
-
-    /// Return the version of the leaf.
-    pub fn version(&self) -> LeafVersion {
-        match self {
-            TapLeafScript::Miniscript(..) => LeafVersion::default(),
-        }
-    }
-
-    /// Return the byte size of the encoded leaf script (witness script).
-    pub fn script_size(&self) -> usize {
-        match self {
-            TapLeafScript::Miniscript(ms) => ms.script_size(),
-        }
-    }
-
-    /// Return the maximum number of witness elements used to satisfied the leaf script,
-    /// including the witness script itself.
-    pub fn max_satisfaction_witness_elements(&self) -> Result<usize, Error> {
-        match self {
-            TapLeafScript::Miniscript(ms) => ms.max_satisfaction_witness_elements(),
-        }
-    }
-
-    /// Return the maximum byte size of a satisfying witness.
-    pub fn max_satisfaction_size(&self) -> Result<usize, Error> {
-        match self {
-            TapLeafScript::Miniscript(ms) => ms.max_satisfaction_size(),
-        }
-    }
-
-    /// Return an iterator over the plain public keys (and not key hash values) of the leaf script.
-    pub fn iter_pk(&self) -> Box<dyn Iterator<Item=Pk> + 'a> {
-        match self {
-            TapLeafScript::Miniscript(ms) => Box::new(ms.iter_pk()),
-        }
-    }
-}
-
-impl<'a, Pk: ToPublicKey, Ext: ParseableExt> TapLeafScript<'a, Pk, Ext> {
-    /// Encode the leaf script as Bitcoin script (witness script).
-    pub fn encode(&self) -> Script {
-        match self {
-            TapLeafScript::Miniscript(ms) => ms.encode(),
-        }
-    }
-
-    /// Attempt to produce a malleable satisfying witness for the leaf script.
-    pub fn satisfy_malleable<S: Satisfier<Pk>>(&self, satisfier: S) -> Result<Vec<Vec<u8>>, Error> {
-        match self {
-            TapLeafScript::Miniscript(ms) => ms.satisfy_malleable(satisfier),
-        }
-    }
-
-    /// Attempt to produce a non-malleable satisfying witness for the leaf script.
-    pub fn satisfy<S: Satisfier<Pk>>(&self, satisfier: S) -> Result<Vec<Vec<u8>>, Error> {
-        match self {
-            TapLeafScript::Miniscript(ms) => ms.satisfy(satisfier),
-        }
-    }
-}
-
-/// Iterator over the leaves of a tap tree.
-///
-/// Each leaf consists is a pair of (depth, script).
-/// The leaves are yielded in a depth-first walk.
-///
-/// For example, this tree:
-///                                     - N0 -
-///                                    /     \\
-///                                   N1      N2
-///                                  /  \    /  \\
-///                                 A    B  C   N3
-///                                            /  \\
-///                                           D    E
-/// would yield (2, A), (2, B), (2,C), (3, D), (3, E).
-///
-#[derive(Debug, Clone)]
-pub struct TapTreeIter<'a, Pk: MiniscriptKey, Ext: Extension> {
-    stack: Vec<(usize, &'a TapTree<Pk, Ext>)>,
-}
-
-impl<'a, Pk, Ext> Iterator for TapTreeIter<'a, Pk, Ext>
-where
-    Pk: MiniscriptKey + 'a,
-    Ext: Extension,
-{
-    type Item = (usize, TapLeafScript<'a, Pk, Ext>);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        while let Some((depth, last)) = self.stack.pop() {
-            match *last {
-                TapTree::Tree(ref l, ref r) => {
-                    self.stack.push((depth + 1, r));
-                    self.stack.push((depth + 1, l));
-                }
-                TapTree::Leaf(ref ms) => {
-                    return Some((depth, TapLeafScript::Miniscript(ms)))
-                },
-            }
-        }
-        None
-    }
-}
-
-#[rustfmt::skip]
-impl_block_str!(
-    Tr<Pk, Ext>,
-    => Ext; Extension,
-    // Helper function to parse taproot script path
-    fn parse_tr_script_spend(tree: expression::TreeIterItem<'_>,) -> Result<TapTree<Pk, Ext>, Error> {
-        if tree.parens() != Parens::Curly {
-            let script = Miniscript::<Pk, Tap, Ext>::from_tree_ext(tree, &ExtParams::sane())?;
-            return Ok(TapTree::Leaf(Arc::new(script)));
-        }
-        let mut children = tree.children();
-        match (tree.name(), children.next(), children.next(), children.next()) {
-            ("", Some(left), Some(right), None) => {
-                let left = Self::parse_tr_script_spend(left)?;
-                let right = Self::parse_tr_script_spend(right)?;
-                Ok(TapTree::Tree(Arc::new(left), Arc::new(right)))
-            }
-            _ => Err(Error::Unexpected(
-                "unknown format for script spending paths while parsing taproot descriptor"
-                    .to_string(),
-            )),
-        }
-    }
-);
-
 impl_from_tree!(
     Tr<Pk, Ext>,
     => Ext; Extension,
-    fn from_tree(top: expression::TreeIterItem<'_>) -> Result<Self, Error> {
-        if top.name() == "eltr" {
-            expression::verify_round_parens(top)?;
-            let mut args = top.children();
-            match (args.next(), args.next(), args.next()) {
-                (Some(key), None, None) => {
-                    Tr::new(expression::terminal(key, Pk::from_str)?, None)
+    fn from_tree(root: expression::TreeIterItem<'_>) -> Result<Self, Error> {
+        use bitcoin_miniscript::ParseTreeError;
+
+        let key = root.verify_toplevel("eltr", 1..=2)?;
+        let internal_key = expression::terminal(key, Pk::from_str)?;
+
+        let tap_tree = match key.right_sibling() {
+            None => return Self::new(internal_key, None),
+            Some(tree) => tree,
+        };
+
+        let mut tree_builder = taptree::TapTreeBuilder::new();
+        let mut tap_tree_iter = tap_tree.pre_order_iter();
+        // while let construction needed because we modify the iterator inside the loop
+        // (by calling skip_descendants to skip over the contents of the tapscripts).
+        while let Some(node) = tap_tree_iter.next() {
+            if node.parens() == Parens::Curly {
+                if !node.name().is_empty() {
+                    return Err(Error::from(ParseTreeError::IncorrectName {
+                        actual: node.name().to_owned(),
+                        expected: "",
+                    }));
                 }
-                (Some(key), Some(tree), None) => {
-                    let ret = Self::parse_tr_script_spend(tree)?;
-                    Tr::new(expression::terminal(key, Pk::from_str)?, Some(ret))
-                }
-                _ => {
-                    Err(Error::Unexpected(format!(
-                        "{}[#{} args] while parsing taproot descriptor",
-                        top.name(),
-                        top.n_children()
-                    )))
-                }
+                node.verify_n_children("taptree branch", 2..=2)?;
+                tree_builder.push_inner_node()?;
+            } else {
+                let script = Miniscript::<Pk, Tap, Ext>::from_tree_ext(node, &ExtParams::sane())?;
+                tree_builder.push_leaf(script);
+                tap_tree_iter.skip_descendants();
             }
-        } else {
-            Err(Error::Unexpected(format!(
-                "{}[#{} args] while parsing taproot descriptor",
-                top.name(),
-                top.n_children()
-            )))
         }
+        Self::new(internal_key, Some(tree_builder.finalize()))
     }
 );
 
@@ -612,24 +381,6 @@ impl<Pk: MiniscriptKey, Ext: Extension> fmt::Display for Tr<Pk, Ext> {
     }
 }
 
-impl<Pk: MiniscriptKey, Ext: Extension> Liftable<Pk> for TapTree<Pk, Ext> {
-    fn lift(&self) -> Result<Policy<Pk>, Error> {
-        fn lift_helper<Pk: MiniscriptKey, Ext: Extension>(
-            s: &TapTree<Pk, Ext>,
-        ) -> Result<Policy<Pk>, Error> {
-            match s {
-                TapTree::Tree(ref l, ref r) => {
-                    Ok(Policy::Threshold(1, vec![lift_helper(l)?, lift_helper(r)?]))
-                }
-                TapTree::Leaf(ref leaf) => leaf.lift(),
-            }
-        }
-
-        let pol = lift_helper(self)?;
-        Ok(pol.normalized())
-    }
-}
-
 impl<Pk: MiniscriptKey, Ext: Extension> Liftable<Pk> for Tr<Pk, Ext> {
     fn lift(&self) -> Result<Policy<Pk>, Error> {
         match &self.tree {
@@ -648,12 +399,8 @@ impl<Pk: MiniscriptKey, Ext: Extension> ForEachKey<Pk> for Tr<Pk, Ext> {
         Pk: 'a,
     {
         let script_keys_res = self
-            .iter_scripts()
-            .all(|(_d, script)| {
-                match script {
-                    TapLeafScript::Miniscript(ms) => ms.for_each_key(&mut pred),
-                }
-            });
+            .leaves()
+            .all(|leaf| leaf.miniscript().for_each_key(&mut pred));
         script_keys_res && pred(&self.internal_key)
     }
 }
@@ -666,19 +413,21 @@ where
 {
     type Output = Tr<Q, Ext>;
 
+    /// Translates the internal key before the script tree, preserving textual key order.
     fn translate_pk<T, E>(&self, translate: &mut T) -> Result<Self::Output, E>
     where
         T: Translator<P, Q, E>,
     {
-        let translate_desc = Tr {
-            internal_key: translate.pk(&self.internal_key)?,
-            tree: match &self.tree {
-                Some(tree) => Some(tree.translate_helper(translate)?),
-                None => None,
-            },
-            spend_info: Mutex::new(None),
+        let internal_key = translate.pk(&self.internal_key)?;
+        let tree = match &self.tree {
+            Some(tree) => Some(tree.translate_pk(translate)?),
+            None => None,
         };
-        Ok(translate_desc)
+        Ok(Tr {
+            internal_key,
+            tree,
+            spend_info: Mutex::new(None),
+        })
     }
 }
 
@@ -692,27 +441,24 @@ where
 
     fn translate_ext<T, E>(&self, translator: &mut T) -> Result<Self::Output, E>
     where
-        T: crate::ExtTranslator<PExt, QExt, E>,
+        T: ExtTranslator<PExt, QExt, E>,
     {
-        let translate_desc = Tr {
-            internal_key: self.internal_key.clone(),
-            tree: match &self.tree {
-                Some(tree) => Some(tree.translate_ext_helper(translator)?),
-                None => None,
-            },
-            spend_info: Mutex::new(None),
+        let tree = match &self.tree {
+            Some(tree) => Some(tree.translate_ext(translator)?),
+            None => None,
         };
-        Ok(translate_desc)
+        Ok(Tr {
+            internal_key: self.internal_key.clone(),
+            tree,
+            spend_info: Mutex::new(None),
+        })
     }
 }
 
-// Helper function to compute the len of control block at a given depth
-fn control_block_len(depth: usize) -> usize {
-    TAPROOT_CONTROL_BASE_SIZE + depth * TAPROOT_CONTROL_NODE_SIZE
+fn control_block_len(depth: u8) -> usize {
+    TAPROOT_CONTROL_BASE_SIZE + (depth as usize) * TAPROOT_CONTROL_NODE_SIZE
 }
 
-// Helper function to get a script spend satisfaction
-// try script spend
 fn best_tap_spend<Pk, S, Ext>(
     desc: &Tr<Pk, Ext>,
     satisfier: S,
@@ -731,7 +477,8 @@ where
         // Since we have the complete descriptor we can ignore the satisfier. We don't use the control block
         // map (lookup_control_block) from the satisfier here.
         let (mut min_wit, mut min_wit_len) = (None, None);
-        for (depth, script) in desc.iter_scripts() {
+        for leaf in desc.leaves() {
+            let script = leaf.miniscript();
             let mut wit = if allow_mall {
                 match script.satisfy_malleable(&satisfier) {
                     Ok(wit) => wit,
@@ -747,14 +494,14 @@ where
             // Control block len + script len + witnesssize + varint(wit.len + 2)
             // The extra +2 elements are control block and script itself
             let wit_size = witness_size(&wit)
-                + control_block_len(depth)
+                + control_block_len(leaf.depth())
                 + script.script_size()
                 + varint_len(script.script_size());
 
             if min_wit_len.is_some() && Some(wit_size) > min_wit_len {
                 continue;
             } else {
-                let leaf_script = (script.encode(), script.version());
+                let leaf_script = (leaf.compute_script(), leaf.leaf_version());
                 let control_block = spend_info
                     .control_block(&leaf_script)
                     .expect("Control block must exist in script map for every known leaf");
@@ -779,53 +526,69 @@ mod tests {
     use std::str::FromStr;
 
     use super::*;
-    use crate::{ForEachKey, NoExt};
 
-    #[test]
-    fn test_for_each() {
+    fn strip_ws(desc: &str) -> String {
+        desc.replace(&[' ', '\n'][..], "")
+    }
+
+    fn descriptor() -> String {
         let desc = "eltr(acc0, {
-            multi_a(3, acc10, acc11, acc12), {
+            {
+              multi_a(3, acc10, acc11, acc12),
               and_v(
                 v:multi_a(2, acc10, acc11, acc12),
                 after(10)
-              ),
-              and_v(
-                v:multi_a(1, acc10, acc11, ac12),
-                after(100)
               )
-            }
+            },
+            and_v(
+              v:multi_a(1, acc10, acc11, ac12),
+              after(100)
+            )
          })";
-        let desc = desc.replace(&[' ', '\n'][..], "");
-        let tr = Tr::<String, NoExt>::from_str(&desc).unwrap();
+        strip_ws(desc)
+    }
+
+    fn assert_display_roundtrip(desc: &str) {
+        let desc = strip_ws(desc);
+        let tr = Tr::<String>::from_str(&desc).unwrap();
+        assert_eq!(format!("{:#}", tr), desc);
+        Tr::<String>::from_str(&tr.to_string()).unwrap();
+    }
+
+    #[test]
+    fn for_each() {
+        let desc = descriptor();
+        let tr = Tr::<String>::from_str(&desc).unwrap();
         // Note the last ac12 only has ac and fails the predicate
         assert!(!tr.for_each_key(|k| k.starts_with("acc")));
     }
 
-    fn verify_from_str(desc_str: &str, internal_key: &str, scripts: &[TapLeafScript<String, NoExt>]) {
+    #[test]
+    fn display_roundtrips_unbalanced_taptree() {
+        assert_display_roundtrip(&descriptor());
+        assert_display_roundtrip("eltr(acc0,{pk(acc1),{pk(acc2),pk(acc3)}})");
+        assert_display_roundtrip("eltr(acc0,{{pk(acc1),pk(acc2)},{pk(acc3),pk(acc4)}})");
+    }
+
+    fn verify_from_str(desc_str: &str, internal_key: &str, scripts: &[&Miniscript<String, Tap>]) {
         let desc = Tr::<String, NoExt>::from_str(desc_str).unwrap();
         assert_eq!(desc_str, &desc.to_string());
-        assert_eq!(internal_key, &desc.internal_key);
+        assert_eq!(internal_key, desc.internal_key());
 
-        let desc_scripts: Vec<_> = desc.iter_scripts().collect();
-        assert_eq!(scripts.len(), scripts.len());
+        let desc_scripts: Vec<_> = desc.leaves().collect();
+        assert_eq!(desc_scripts.len(), scripts.len());
 
-        for i in 0..scripts.len() {
-            let script = &scripts[i];
-            assert_eq!(script, &desc_scripts[i].1);
+        for (script, leaf) in scripts.iter().zip(desc_scripts.iter()) {
+            assert_eq!(*script, &**leaf.miniscript());
         }
     }
 
     #[test]
     fn tr_from_str() {
-        // Key spend only
         verify_from_str("eltr(internal)#0aen4jhp", "internal", &[]);
 
-        // Miniscript key spend
         let ms = Miniscript::<String, Tap>::from_str("pk(a)").unwrap();
-        verify_from_str(
-            "eltr(internal,pk(a))#vadmk9gd", "internal",
-            &[TapLeafScript::Miniscript(&ms)]
-        );
+        verify_from_str("eltr(internal,pk(a))#vadmk9gd", "internal", &[&ms]);
     }
 
     #[test]
@@ -856,5 +619,36 @@ mod tests {
         ] {
             assert!(Tr::<String>::from_str(s).is_err(), "{}", s);
         }
+    }
+
+    #[test]
+    fn tr_maximum_depth() {
+        // A leaf at depth 128 is allowed, a leaf at depth 129 is not.
+        fn nested(depth: usize) -> String {
+            let mut s = String::from("eltr(X!,");
+            for i in 1..=depth {
+                s.push_str(&format!("{{pk(X{}!),", i));
+            }
+            s.push_str(&format!("pk(X{})", depth + 1));
+            s.push_str(&"}".repeat(depth));
+            s.push(')');
+            s
+        }
+        let descriptor128 = nested(128);
+        let tr = descriptor128.parse::<Tr<String>>().unwrap();
+        assert_eq!(tr.leaves().map(|leaf| leaf.depth()).max(), Some(128));
+        descriptor128.parse::<crate::Descriptor<String>>().unwrap();
+
+        let descriptor129 = nested(129);
+        assert!(matches!(
+            descriptor129.parse::<Tr<String>>().unwrap_err(),
+            Error::TapTreeDepthError(TapTreeDepthError),
+        ));
+        assert!(matches!(
+            descriptor129
+                .parse::<crate::Descriptor<String>>()
+                .unwrap_err(),
+            Error::TapTreeDepthError(TapTreeDepthError),
+        ));
     }
 }

@@ -466,7 +466,7 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
                                     )
                                 })
                                 .collect();
-                            let taptree = with_huffman_tree::<Pk>(leaf_compilations).unwrap();
+                            let taptree = with_huffman_tree::<Pk>(leaf_compilations)?;
                             Some(taptree)
                         }
                     },
@@ -811,7 +811,7 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
         }
     }
 
-    /// Get the number of [TapLeaf][`TapTree::Leaf`] considering exhaustive root-level [OR][`Policy::Or`]
+    /// Get the number of [TapLeaf][`TapTree::leaf`] considering exhaustive root-level [OR][`Policy::Or`]
     /// and [Thresh][`Policy::Threshold`] disjunctions for the TapTree.
     #[cfg(feature = "compiler")]
     fn num_tap_leaves(&self) -> usize {
@@ -1233,7 +1233,7 @@ fn with_huffman_tree<Pk: MiniscriptKey>(
 ) -> Result<TapTree<Pk, NoExt>, Error> {
     let mut node_weights = BinaryHeap::<(Reverse<OrdF64>, TapTree<Pk>)>::new();
     for (prob, script) in ms {
-        node_weights.push((Reverse(prob), TapTree::Leaf(Arc::new(script))));
+        node_weights.push((Reverse(prob), TapTree::leaf(script)));
     }
     if node_weights.is_empty() {
         return Err(errstr("Empty Miniscript compilation"));
@@ -1243,10 +1243,7 @@ fn with_huffman_tree<Pk: MiniscriptKey>(
         let (p2, s2) = node_weights.pop().expect("len must atleast be two");
 
         let p = (p1.0).0 + (p2.0).0;
-        node_weights.push((
-            Reverse(OrdF64(p)),
-            TapTree::Tree(Arc::from(s1), Arc::from(s2)),
-        ));
+        node_weights.push((Reverse(OrdF64(p)), TapTree::combine(s1, s2)?));
     }
 
     debug_assert!(node_weights.len() == 1);
@@ -1293,7 +1290,29 @@ mod tests {
     use std::sync::Arc;
 
     use super::Concrete;
-    use crate::policy::concrete::{generate_combination, PolicyArc};
+    use crate::policy::compiler::OrdF64;
+    use crate::policy::concrete::{generate_combination, with_huffman_tree, PolicyArc};
+    use crate::{Error, Miniscript, Tap};
+
+    #[test]
+    fn huffman_tree_depth_limit() {
+        // Probabilities 1/2, 1/4, ..., 1/2^(n-1) and 1/2^(n-1) give a Huffman
+        // tree with n leaves whose two deepest leaves are at depth n-1.
+        let leaves = |n: i32| {
+            (1..=n)
+                .map(|i| {
+                    let ms = Miniscript::<String, Tap>::from_str(&format!("pk(K{})", i)).unwrap();
+                    (OrdF64(2f64.powi(-i.min(n - 1))), ms)
+                })
+                .collect::<Vec<_>>()
+        };
+        let tree = with_huffman_tree(leaves(129)).unwrap();
+        assert_eq!(tree.leaves().map(|leaf| leaf.depth()).max(), Some(128));
+        assert!(matches!(
+            with_huffman_tree(leaves(130)),
+            Err(Error::TapTreeDepthError(_))
+        ));
+    }
 
     #[test]
     fn test_gen_comb() {

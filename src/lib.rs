@@ -336,11 +336,6 @@ pub enum Error {
     LiftError(policy::LiftError),
     /// Forward script context related errors
     ContextError(miniscript::context::ScriptContextError),
-    /// A Taproot script tree is deeper than the 128 levels a Taproot control
-    /// block allows. [`descriptor::Tr::new`] returns it, including when parsing
-    /// `eltr` descriptors. Expressions nested too deeply for the expression
-    /// parser are reported as rust-miniscript parse errors in [`Error::BtcError`].
-    MaxRecursiveDepthExceeded,
     /// Script size too large
     ScriptSizeTooLarge,
     /// Anything but c:pk(key) (P2PK), c:pk_h(key) (P2PKH), and thresh_m(k,...)
@@ -369,6 +364,10 @@ pub enum Error {
 
     /// Conversion error in descriptor
     Conversion(descriptor::ConversionError),
+
+    /// A Taproot script tree is deeper than the 128 levels a Taproot control
+    /// block allows.
+    TapTreeDepthError(descriptor::TapTreeDepthError),
 }
 
 #[doc(hidden)]
@@ -459,6 +458,13 @@ impl From<descriptor::ConversionError> for Error {
     }
 }
 
+#[doc(hidden)]
+impl From<descriptor::TapTreeDepthError> for Error {
+    fn from(e: descriptor::TapTreeDepthError) -> Error {
+        Error::TapTreeDepthError(e)
+    }
+}
+
 fn errstr(s: &str) -> Error {
     Error::Unexpected(s.to_owned())
 }
@@ -506,11 +512,6 @@ impl fmt::Display for Error {
             Error::CompilerError(ref e) => fmt::Display::fmt(e, f),
             Error::PolicyError(ref e) => fmt::Display::fmt(e, f),
             Error::LiftError(ref e) => fmt::Display::fmt(e, f),
-            Error::MaxRecursiveDepthExceeded => write!(
-                f,
-                "Taproot script tree depth over {} not permitted",
-                elements::taproot::TAPROOT_CONTROL_MAX_NODE_COUNT
-            ),
             Error::ScriptSizeTooLarge => write!(
                 f,
                 "Standardness rules imply bitcoin than {} bytes",
@@ -535,6 +536,7 @@ impl fmt::Display for Error {
             Error::MultipathDescLenMismatch => write!(f, "At least two BIP389 key expressions in the descriptor contain tuples of derivation indexes of different lengths"),
             Error::Conversion(ref e) => e.fmt(f),
             Error::UnsupportedAddressForPegin => write!(f, "Cannot create the address from the pegin descriptor, the federation descriptor is of an unsuppported type"),
+            Error::TapTreeDepthError(ref e) => fmt::Display::fmt(e, f),
 
         }
     }
@@ -564,7 +566,6 @@ impl error::Error for Error {
             | CouldNotSatisfy
             | TypeCheck(_)
             | BadDescriptor(_)
-            | MaxRecursiveDepthExceeded
             | ScriptSizeTooLarge
             | NonStandardBareScript
             | ImpossibleSatisfaction
@@ -587,6 +588,7 @@ impl error::Error for Error {
             AnalysisError(e) => Some(e),
             PubKeyCtxError(e, _) => Some(e),
             Conversion(e) => Some(e),
+            TapTreeDepthError(e) => Some(e),
         }
     }
 }
