@@ -1297,27 +1297,16 @@ where
         ),
     );
 
-    let mut builder = taproot::TaprootBuilder::new();
-
-    for (leaf_derived, leaf_xpk) in tr_derived.leaves().zip(tr_xpk.leaves()) {
+    for (leaf_derived, leaf_xpk) in spend_info.leaves().zip(tr_xpk.leaves()) {
         debug_assert_eq!(leaf_derived.depth(), leaf_xpk.depth());
-        let leaf_script = (leaf_derived.compute_script(), leaf_xpk.leaf_version());
-        let tapleaf_hash = TapLeafHash::from_script(&leaf_script.0, leaf_script.1);
-        builder = builder
-            .add_leaf(usize::from(leaf_derived.depth()), leaf_script.0.clone())
-            .expect("Computing spend data on a valid tree should always succeed");
+        let tapleaf_hash = leaf_derived.leaf_hash();
+        let miniscript = leaf_derived.miniscript();
         if let Some(tap_scripts) = item.tap_scripts() {
-            let control_block = spend_info
-                .control_block(&leaf_script)
-                .expect("Control block must exist in script map for every known leaf");
-            tap_scripts.insert(control_block, leaf_script);
+            let leaf_script = (leaf_derived.script().clone(), leaf_derived.leaf_version());
+            tap_scripts.insert(leaf_derived.into_control_block(), leaf_script);
         }
 
-        for (derived_pk, xpk) in leaf_derived
-            .miniscript()
-            .iter_pk()
-            .zip(leaf_xpk.miniscript().iter_pk())
-        {
+        for (derived_pk, xpk) in miniscript.iter_pk().zip(leaf_xpk.miniscript().iter_pk()) {
             let (xonly, xpk) = (derived_pk.to_x_only_pubkey(), xpk);
 
             item.tap_key_origins()
@@ -1348,9 +1337,7 @@ where
     }
 
     if let Some(tap_tree) = item.tap_tree() {
-        *tap_tree = tr_derived.tap_tree().map(|_| {
-            psbt::TapTree::from_inner(builder).expect("The tree should always be valid")
-        });
+        *tap_tree = spend_info.to_tap_tree();
     }
     Ok(())
 }

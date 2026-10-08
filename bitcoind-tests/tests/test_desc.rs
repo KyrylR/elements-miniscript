@@ -13,7 +13,7 @@ use elements::hashes::sha256::Hash as ElementsSha256;
 use elements::hashes::sha256d::Hash as ElementsSha256d;
 use elements::pset::PartiallySignedTransaction as Psbt;
 use elements::sighash::SighashCache;
-use elements::taproot::TapLeafHash;
+use elements::taproot::{TapLeafHash, TapTweakHash};
 use elements::{
     confidential, pset as psbt, secp256k1_zkp as secp256k1, sighash, OutPoint, SchnorrSig, Script,
     Sequence, TxIn, TxOut, Txid,
@@ -25,7 +25,6 @@ use miniscript::{
 };
 use rand::RngCore;
 mod setup;
-use ::secp256k1::Scalar;
 use setup::test_util::{self, TestData, PARAMS};
 use setup::Call;
 use {actual_rand as rand, elements_miniscript as miniscript};
@@ -155,8 +154,11 @@ pub fn test_desc_satisfy(
                 let internal_keypair = internal_keypair
                     .add_xonly_tweak(
                         &secp,
-                        &Scalar::from_be_bytes(tr.spend_info().tap_tweak().to_byte_array())
-                            .expect("valid scalar"),
+                        &TapTweakHash::from_key_and_tweak(
+                            tr.spend_info().internal_key(),
+                            tr.spend_info().merkle_root(),
+                        )
+                        .to_scalar(),
                     )
                     .expect("Tweaking failed");
                 let sighash_msg = sighash_cache

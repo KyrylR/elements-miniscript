@@ -3,9 +3,7 @@
 use std::sync::{Arc, Mutex};
 use std::{cmp, fmt, hash};
 
-use elements::taproot::{
-    TaprootBuilder, TaprootSpendInfo, TAPROOT_CONTROL_BASE_SIZE, TAPROOT_CONTROL_NODE_SIZE,
-};
+use elements::taproot::{TAPROOT_CONTROL_BASE_SIZE, TAPROOT_CONTROL_NODE_SIZE};
 use elements::{self, opcodes, secp256k1_zkp, Script};
 
 use super::checksum::verify_checksum;
@@ -23,8 +21,10 @@ use crate::{
     TranslateExt, TranslatePk, Translator,
 };
 
+mod spend_info;
 mod taptree;
 
+pub use self::spend_info::{TrSpendInfo, TrSpendInfoIter, TrSpendInfoIterItem};
 pub use self::taptree::{TapTree, TapTreeDepthError, TapTreeIter, TapTreeIterItem};
 
 /// A taproot descriptor
@@ -34,7 +34,7 @@ pub struct Tr<Pk: MiniscriptKey, Ext: Extension = NoExt> {
     // The inner `Arc` here is because Rust does not allow us to return a reference
     // to the contents of the `Option` from inside a `MutexGuard`. There is no outer
     // `Arc` because each clone gets its own mutex, so clones don't block each other.
-    spend_info: Mutex<Option<Arc<TaprootSpendInfo>>>,
+    spend_info: Mutex<Option<Arc<TrSpendInfo<Pk, Ext>>>>,
 }
 
 impl<Pk: MiniscriptKey, Ext: Extension> Clone for Tr<Pk, Ext> {
@@ -125,45 +125,20 @@ impl<Pk: MiniscriptKey, Ext: Extension> Tr<Pk, Ext> {
     /// This data is needed to compute the Taproot output, so this method is implicitly
     /// called through [`Self::script_pubkey`], [`Self::address`], etc. It is also needed
     /// to compute the hash needed to sign the output.
-    pub fn spend_info(&self) -> Arc<TaprootSpendInfo>
+    pub fn spend_info(&self) -> Arc<TrSpendInfo<Pk, Ext>>
     where
         Pk: ToPublicKey,
         Ext: ParseableExt,
     {
-        // If the value is already cache, read it
-        // read only panics if the lock is poisoned (meaning other thread having a lock panicked)
-        let read_lock = self.spend_info.lock().expect("Lock poisoned");
-        if let Some(ref spend_info) = *read_lock {
-            return Arc::clone(spend_info);
+        let mut lock = self.spend_info.lock().expect("Lock poisoned");
+        match *lock {
+            Some(ref res) => Arc::clone(res),
+            None => {
+                let arc = Arc::new(TrSpendInfo::from_tr(self));
+                *lock = Some(Arc::clone(&arc));
+                arc
+            }
         }
-        drop(read_lock);
-
-        // Get a new secp context
-        // This would be cheap operation after static context support from upstream
-        let secp = secp256k1_zkp::Secp256k1::verification_only();
-        // Key spend path with no merkle root
-        let data = if self.tree.is_none() {
-            TaprootSpendInfo::new_key_spend(&secp, self.internal_key.to_x_only_pubkey(), None)
-        } else {
-            let mut builder = TaprootBuilder::new();
-            for leaf in self.leaves() {
-                builder = builder
-                    .add_leaf_with_ver(
-                        usize::from(leaf.depth()),
-                        leaf.compute_script(),
-                        leaf.leaf_version(),
-                    )
-                    .expect("Computing spend data on a valid Tree should always succeed");
-            }
-            // Assert builder cannot error here because we have a well formed descriptor
-            match builder.finalize(&secp, self.internal_key.to_x_only_pubkey()) {
-                Ok(data) => data,
-                Err(_) => unreachable!("We know the builder can be finalized"),
-            }
-        };
-        let spend_info = Arc::new(data);
-        *self.spend_info.lock().expect("Lock poisoned") = Some(Arc::clone(&spend_info));
-        spend_info
     }
 
     /// Checks whether the descriptor is safe.
@@ -470,53 +445,44 @@ where
     Ext: ParseableExt,
 {
     let spend_info = desc.spend_info();
-    // First try the key spend path
     if let Some(sig) = satisfier.lookup_tap_key_spend_sig() {
         Ok((vec![sig.to_vec()], Script::new()))
     } else {
         // Since we have the complete descriptor we can ignore the satisfier. We don't use the control block
         // map (lookup_control_block) from the satisfier here.
         let (mut min_wit, mut min_wit_len) = (None, None);
-        for leaf in desc.leaves() {
-            let script = leaf.miniscript();
+        for leaf in spend_info.leaves() {
             let mut wit = if allow_mall {
-                match script.satisfy_malleable(&satisfier) {
+                match leaf.miniscript().satisfy_malleable(&satisfier) {
                     Ok(wit) => wit,
-                    Err(..) => continue, // No witness for this script in tr descriptor, look for next one
+                    Err(..) => continue,
                 }
             } else {
-                match script.satisfy(&satisfier) {
+                match leaf.miniscript().satisfy(&satisfier) {
                     Ok(wit) => wit,
-                    Err(..) => continue, // No witness for this script in tr descriptor, look for next one
+                    Err(..) => continue,
                 }
             };
-            // Compute the final witness size
-            // Control block len + script len + witnesssize + varint(wit.len + 2)
-            // The extra +2 elements are control block and script itself
+            // Size used to pick the smallest spend. It adds the script with its length
+            // prefix and the control block, which are pushed below, to the satisfaction.
+            let script_size = leaf.script().len();
             let wit_size = witness_size(&wit)
                 + control_block_len(leaf.depth())
-                + script.script_size()
-                + varint_len(script.script_size());
+                + script_size
+                + varint_len(script_size);
 
             if min_wit_len.is_some() && Some(wit_size) > min_wit_len {
                 continue;
             } else {
-                let leaf_script = (leaf.compute_script(), leaf.leaf_version());
-                let control_block = spend_info
-                    .control_block(&leaf_script)
-                    .expect("Control block must exist in script map for every known leaf");
-                wit.push(leaf_script.0.into_bytes()); // Push the leaf script
-                                                      // There can be multiple control blocks for a (script, ver) pair
-                                                      // Find the smallest one amongst those
-                wit.push(control_block.serialize());
-                // Finally, save the minimum
+                wit.push(leaf.script().to_bytes());
+                wit.push(leaf.control_block().serialize());
                 min_wit = Some(wit);
                 min_wit_len = Some(wit_size);
             }
         }
         match min_wit {
             Some(wit) => Ok((wit, Script::new())),
-            None => Err(Error::CouldNotSatisfy), // Could not satisfy all miniscripts inside Tr
+            None => Err(Error::CouldNotSatisfy),
         }
     }
 }
