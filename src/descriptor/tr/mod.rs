@@ -15,7 +15,7 @@ use crate::miniscript::analyzable::ExtParams;
 use crate::miniscript::Miniscript;
 use crate::policy::semantic::Policy;
 use crate::policy::Liftable;
-use crate::util::{varint_len, witness_size};
+use crate::util::varint_len;
 use crate::{
     Error, ExtTranslator, Extension, ForEachKey, MiniscriptKey, NoExt, Satisfier, Tap, ToPublicKey,
     TranslateExt, TranslatePk, Translator,
@@ -152,11 +152,11 @@ impl<Pk: MiniscriptKey, Ext: Extension> Tr<Pk, Ext> {
     /// Computes an upper bound on the difference between a non-satisfied
     /// `TxIn`'s `segwit_weight` and a satisfied `TxIn`'s `segwit_weight`
     ///
-    /// Assumes all Schnorr signatures are 66 bytes, including push opcode and
-    /// sighash suffix.
+    /// Assumes all Schnorr signatures are 65 bytes, including the sighash type,
+    /// plus a 1-byte witness length prefix.
     ///
     /// # Errors
-    /// When the descriptor is impossible to safisfy (ex: sh(OP_FALSE)).
+    /// When no leaf of the script tree can be satisfied.
     pub fn max_weight_to_satisfy(&self) -> Result<usize, Error> {
         let tree = match self.tap_tree() {
             None => {
@@ -201,12 +201,12 @@ impl<Pk: MiniscriptKey, Ext: Extension> Tr<Pk, Ext> {
     /// Computes an upper bound on the weight of a satisfying witness to the
     /// transaction.
     ///
-    /// Assumes all ec-signatures are 73 bytes, including push opcode and
-    /// sighash suffix. Includes the weight of the VarInts encoding the
-    /// scriptSig and witness stack length.
+    /// Assumes all Schnorr signatures are 65 bytes, including the sighash type,
+    /// plus a 1-byte witness length prefix. Includes the weight of the VarInts
+    /// encoding the scriptSig and witness stack length.
     ///
     /// # Errors
-    /// When the descriptor is impossible to safisfy (ex: sh(OP_FALSE)).
+    /// When no leaf of the script tree can be satisfied.
     #[deprecated(note = "use max_weight_to_satisfy instead")]
     pub fn max_satisfaction_weight(&self) -> Result<usize, Error> {
         let tree = match self.tap_tree() {
@@ -448,8 +448,7 @@ where
     if let Some(sig) = satisfier.lookup_tap_key_spend_sig() {
         Ok((vec![sig.to_vec()], Script::new()))
     } else {
-        // Since we have the complete descriptor we can ignore the satisfier. We don't use the control block
-        // map (lookup_control_block) from the satisfier here.
+        let item_size = |len| varint_len(len) + len;
         let (mut min_wit, mut min_wit_len) = (None, None);
         for leaf in spend_info.leaves() {
             let mut wit = if allow_mall {
@@ -463,13 +462,12 @@ where
                     Err(..) => continue,
                 }
             };
-            // Size used to pick the smallest spend. It adds the script with its length
-            // prefix and the control block, which are pushed below, to the satisfaction.
-            let script_size = leaf.script().len();
-            let wit_size = witness_size(&wit)
-                + control_block_len(leaf.depth())
-                + script_size
-                + varint_len(script_size);
+            // Serialized size of the witness with the script and the control block
+            // pushed below: the item count, then each item with its length prefix.
+            let wit_size = varint_len(wit.len() + 2)
+                + wit.iter().map(|item| item_size(item.len())).sum::<usize>()
+                + item_size(leaf.script().len())
+                + item_size(control_block_len(leaf.depth()));
 
             if min_wit_len.is_some() && Some(wit_size) > min_wit_len {
                 continue;
@@ -489,9 +487,14 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::str::FromStr;
 
+    use elements::taproot::TapLeafHash;
+
     use super::*;
+
+    type Ms = Miniscript<bitcoin::PublicKey, Tap>;
 
     fn strip_ws(desc: &str) -> String {
         desc.replace(&[' ', '\n'][..], "")
@@ -616,5 +619,140 @@ mod tests {
                 .unwrap_err(),
             Error::TapTreeDepthError(TapTreeDepthError),
         ));
+    }
+
+    // The keys and the address of `examples/taproot.rs`.
+    #[test]
+    fn script_path_address() {
+        let key = |bytes: [u8; 32]| bitcoin::key::XOnlyPublicKey::from_slice(&bytes).unwrap();
+        let h_a = key([
+            22, 37, 41, 4, 57, 254, 191, 38, 14, 184, 200, 133, 111, 226, 145, 183, 245, 112, 100,
+            42, 69, 210, 146, 60, 179, 170, 174, 247, 231, 224, 221, 52,
+        ]);
+        let s = key([
+            194, 16, 47, 19, 231, 1, 0, 143, 203, 11, 35, 148, 101, 75, 200, 15, 14, 54, 222, 208,
+            31, 205, 191, 215, 80, 69, 214, 126, 10, 124, 107, 154,
+        ]);
+        let ca = key([
+            202, 56, 167, 245, 51, 10, 193, 145, 213, 151, 66, 122, 208, 43, 10, 17, 17, 153, 170,
+            29, 89, 133, 223, 134, 220, 212, 166, 138, 2, 152, 122, 16,
+        ]);
+        let in_key = key([
+            50, 23, 194, 4, 213, 55, 42, 210, 67, 101, 23, 3, 195, 228, 31, 70, 127, 79, 21, 188,
+            168, 39, 134, 58, 19, 181, 3, 63, 235, 103, 155, 213,
+        ]);
+        let desc = format!(
+            "eltr({},{{and_v(v:pk({}),older(9)),multi_a(2,{},{})}})",
+            ca, in_key, h_a, s
+        );
+        let tr = Tr::<bitcoin::key::XOnlyPublicKey>::from_str(&desc).unwrap();
+        assert_eq!(
+            tr.address(None, &elements::AddressParams::ELEMENTS),
+            elements::Address::from_str(
+                "ert1pxx6wkfdnnx97akwws8l8xdmx5n03qftvx2t269k4sn9adm2emz0sdnytn4"
+            )
+            .unwrap(),
+        );
+    }
+
+    fn serialized_witness_size(witness: &[Vec<u8>]) -> usize {
+        bitcoin::consensus::serialize(&bitcoin::Witness::from_slice(witness)).len()
+    }
+
+    // Checks that both satisfaction methods select the script
+    // spend with the smallest serialized witness, and that this witness has `size` bytes.
+    fn assert_smallest_script_spend<S: Satisfier<bitcoin::PublicKey>>(
+        tr: &Tr<bitcoin::PublicKey>,
+        satisfier: &S,
+        size: usize,
+    ) {
+        let spend_info = tr.spend_info();
+        for mall in [false, true] {
+            let smallest = spend_info
+                .leaves()
+                .filter_map(|leaf| {
+                    let satisfaction = if mall {
+                        leaf.miniscript().satisfy_malleable(satisfier)
+                    } else {
+                        leaf.miniscript().satisfy(satisfier)
+                    };
+                    let mut witness = satisfaction.ok()?;
+                    witness.push(leaf.script().to_bytes());
+                    witness.push(leaf.control_block().serialize());
+                    Some(witness)
+                })
+                .min_by_key(|witness| serialized_witness_size(witness))
+                .unwrap();
+            assert_eq!(serialized_witness_size(&smallest), size);
+
+            let (witness, script_sig) = if mall {
+                tr.get_satisfaction_mall(satisfier).unwrap()
+            } else {
+                tr.get_satisfaction(satisfier).unwrap()
+            };
+            assert_eq!(witness, smallest, "mall: {}", mall);
+            assert!(script_sig.is_empty());
+        }
+    }
+
+    fn test_key() -> bitcoin::PublicKey {
+        bitcoin::PublicKey::from_str(
+            "03cc8a4bc64d897bddc5fbc2f670f7a8ba0b386779106cf1223c6fc5d7cd6fc115",
+        )
+        .unwrap()
+    }
+
+    fn leaf(ms: &str) -> TapTree<bitcoin::PublicKey> {
+        TapTree::leaf(Ms::from_str_insane(ms).unwrap())
+    }
+
+    // A signature by `key` for every leaf of `tr`.
+    fn signatures(
+        tr: &Tr<bitcoin::PublicKey>,
+        key: bitcoin::PublicKey,
+    ) -> HashMap<(bitcoin::PublicKey, TapLeafHash), elements::SchnorrSig> {
+        let sig = elements::SchnorrSig {
+            sig: secp256k1_zkp::schnorr::Signature::from_str("84526253c27c7aef56c7b71a5cd25bebb66dddda437826defc5b2568bde81f0784526253c27c7aef56c7b71a5cd25bebb66dddda437826defc5b2568bde81f07").unwrap(),
+            hash_ty: elements::SchnorrSighashType::Default,
+        };
+        tr.spend_info()
+            .leaves()
+            .map(|leaf| ((key, leaf.leaf_hash()), sig))
+            .collect()
+    }
+
+    #[test]
+    fn smallest_signed_script_spend() {
+        let key = test_key();
+        // A 67-byte script at depth 6, with a 225-byte control block, and a 34-byte
+        // script at depth 7, whose 257-byte control block needs a 3-byte length prefix.
+        // Their witnesses are 360 and 361 bytes.
+        let shallow = leaf(&format!("{}:pk({})", "n".repeat(33), key));
+        let deep = leaf(&format!("pk({})", key));
+        let mut tree =
+            TapTree::combine(shallow, TapTree::combine(deep, leaf("0")).unwrap()).unwrap();
+        for _ in 0..5 {
+            tree = TapTree::combine(leaf("0"), tree).unwrap();
+        }
+        let tr = Tr::new(key, Some(tree)).unwrap();
+        assert_smallest_script_spend(&tr, &signatures(&tr, key), 360);
+    }
+
+    #[test]
+    fn smallest_script_spend_counts_witness_items() {
+        let key = test_key();
+        // `multi_a(1,..)` with `n` keys is satisfied with a signature and `n - 1` empty items.
+        let multi_a = |n: usize| format!("multi_a(1{})", format!(",{}", key).repeat(n));
+        // With the script and the control block, the first witness has 253 items,
+        // whose count needs a 3-byte prefix, and the second one has 252 items and
+        // a 2-byte longer script. Their witnesses are 8923 and 8922 bytes.
+        let many_items = leaf(&multi_a(251));
+        let fewer_items = leaf(&format!("{}:{}", "n".repeat(36), multi_a(250)));
+        let tr = Tr::new(
+            key,
+            Some(TapTree::combine(many_items, fewer_items).unwrap()),
+        )
+        .unwrap();
+        assert_smallest_script_spend(&tr, &signatures(&tr, key), 8922);
     }
 }
