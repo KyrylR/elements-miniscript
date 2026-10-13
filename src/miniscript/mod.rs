@@ -42,8 +42,8 @@ use crate::miniscript::decode::Terminal;
 use crate::miniscript::types::extra_props::ExtData;
 use crate::miniscript::types::Type;
 use crate::{
-    expression, Error, ExtTranslator, Extension, ForEachKey, MiniscriptKey, NoExt, ToPublicKey,
-    TranslateExt, TranslatePk, Translator,
+    expression, plan, Error, ExtTranslator, Extension, ForEachKey, MiniscriptKey, NoExt,
+    ToPublicKey, TranslateExt, TranslatePk, Translator,
 };
 #[cfg(test)]
 mod ms_tests;
@@ -481,6 +481,26 @@ impl<Pk: ToPublicKey, Ctx: ScriptContext, Ext: ParseableExt> Miniscript<Pk, Ctx,
                 Err(Error::CouldNotSatisfy)
             }
         }
+    }
+}
+
+impl<Pk: ToPublicKey, Ext: ParseableExt> Miniscript<Pk, Tap, Ext> {
+    /// Attempt to produce a non-malleable witness template given the assets available
+    pub fn build_template<P: plan::AssetProvider<Pk>>(
+        &self,
+        provider: &P,
+    ) -> plan::Satisfaction<plan::Placeholder<Pk>> {
+        let leaf_hash = TapLeafHash::from_script(&self.encode(), LeafVersion::default());
+        plan::Satisfaction::build_template(self, provider, false, &leaf_hash)
+    }
+
+    /// Attempt to produce a malleable witness template given the assets available
+    pub fn build_template_mall<P: plan::AssetProvider<Pk>>(
+        &self,
+        provider: &P,
+    ) -> plan::Satisfaction<plan::Placeholder<Pk>> {
+        let leaf_hash = TapLeafHash::from_script(&self.encode(), LeafVersion::default());
+        plan::Satisfaction::build_template(self, provider, true, &leaf_hash)
     }
 }
 

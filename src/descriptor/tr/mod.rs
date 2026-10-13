@@ -13,6 +13,9 @@ use crate::expression::{self, FromTree, Parens};
 use crate::extensions::ParseableExt;
 use crate::miniscript::analyzable::ExtParams;
 use crate::miniscript::Miniscript;
+use crate::plan::{
+    serialized_items_size, AssetProvider, Placeholder, Satisfaction, SchnorrSigType, Witness,
+};
 use crate::policy::semantic::Policy;
 use crate::policy::Liftable;
 use crate::util::varint_len;
@@ -283,6 +286,34 @@ impl<Pk: MiniscriptKey + ToPublicKey, Ext: ParseableExt> Tr<Pk, Ext> {
     {
         best_tap_spend(self, satisfier, true /* allow_mall */)
     }
+
+    /// Returns the witness template of a non-malleable spend with the assets of `provider`,
+    /// with the timelocks it requires.
+    ///
+    /// This is a key path spend if the provider has a signature for the internal key, and
+    /// otherwise the script path spend whose template has the smallest serialized witness
+    /// among the leaves. The stack of the template is [`Witness::Unavailable`] if there is
+    /// no such spend.
+    pub fn plan_satisfaction<P>(&self, provider: &P) -> Satisfaction<Placeholder<Pk>>
+    where
+        P: AssetProvider<Pk>,
+    {
+        plan_tap_spend(self, provider, false /* allow_mall */)
+    }
+
+    /// Returns the witness template of a possibly malleable spend with the assets of
+    /// `provider`, with the timelocks it requires.
+    ///
+    /// This is a key path spend if the provider has a signature for the internal key, and
+    /// otherwise the script path spend whose template has the smallest serialized witness
+    /// among the leaves. The stack of the template is [`Witness::Unavailable`] if there is
+    /// no such spend.
+    pub fn plan_satisfaction_mall<P>(&self, provider: &P) -> Satisfaction<Placeholder<Pk>>
+    where
+        P: AssetProvider<Pk>,
+    {
+        plan_tap_spend(self, provider, true /* allow_mall */)
+    }
 }
 
 impl_from_tree!(
@@ -434,6 +465,11 @@ fn control_block_len(depth: u8) -> usize {
     TAPROOT_CONTROL_BASE_SIZE + (depth as usize) * TAPROOT_CONTROL_NODE_SIZE
 }
 
+// The size of a witness item of `len` bytes when serialized, with its length prefix.
+fn item_size(len: usize) -> usize {
+    varint_len(len) + len
+}
+
 fn best_tap_spend<Pk, S, Ext>(
     desc: &Tr<Pk, Ext>,
     satisfier: S,
@@ -448,7 +484,6 @@ where
     if let Some(sig) = satisfier.lookup_tap_key_spend_sig() {
         Ok((vec![sig.to_vec()], Script::new()))
     } else {
-        let item_size = |len| varint_len(len) + len;
         let (mut min_wit, mut min_wit_len) = (None, None);
         for leaf in spend_info.leaves() {
             let mut wit = if allow_mall {
@@ -485,6 +520,66 @@ where
     }
 }
 
+fn plan_tap_spend<Pk, P, Ext>(
+    desc: &Tr<Pk, Ext>,
+    provider: &P,
+    allow_mall: bool,
+) -> Satisfaction<Placeholder<Pk>>
+where
+    Pk: ToPublicKey,
+    P: AssetProvider<Pk>,
+    Ext: ParseableExt,
+{
+    let spend_info = desc.spend_info();
+    if let Some(size) = provider.provider_lookup_tap_key_spend_sig(&desc.internal_key) {
+        return Satisfaction {
+            stack: Witness::Stack(vec![Placeholder::SchnorrSigPk(
+                desc.internal_key.clone(),
+                SchnorrSigType::KeySpend {
+                    merkle_root: spend_info.merkle_root(),
+                },
+                size,
+            )]),
+            has_sig: true,
+            absolute_timelock: None,
+            relative_timelock: None,
+        };
+    }
+    let mut best: Option<(_, _, usize)> = None;
+    for leaf in spend_info.leaves() {
+        let satisfaction = Satisfaction::build_template(
+            leaf.miniscript(),
+            provider,
+            allow_mall,
+            &leaf.leaf_hash(),
+        );
+        // Serialized size of the witness with the script and the control block pushed below.
+        let wit_size = match satisfaction.stack {
+            Witness::Stack(ref wit) => {
+                varint_len(wit.len() + 2)
+                    + serialized_items_size(wit)
+                    + item_size(leaf.script().len())
+                    + item_size(control_block_len(leaf.depth()))
+            }
+            Witness::Unavailable | Witness::Impossible => continue,
+        };
+        if matches!(best, Some((_, _, best_size)) if wit_size > best_size) {
+            continue;
+        }
+        best = Some((satisfaction, leaf, wit_size));
+    }
+    match best {
+        Some((mut satisfaction, leaf, _)) => {
+            if let Witness::Stack(ref mut wit) = satisfaction.stack {
+                wit.push(Placeholder::TapScript(leaf.script().clone()));
+                wit.push(Placeholder::TapControlBlock(leaf.into_control_block()));
+            }
+            satisfaction
+        }
+        None => Satisfaction::<Placeholder<Pk>>::UNAVAILABLE,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -493,6 +588,8 @@ mod tests {
     use elements::taproot::TapLeafHash;
 
     use super::*;
+    use crate::extensions::{CovExtArgs, CovenantExt};
+    use crate::{SigType, Terminal};
 
     type Ms = Miniscript<bitcoin::PublicKey, Tap>;
 
@@ -659,7 +756,7 @@ mod tests {
         bitcoin::consensus::serialize(&bitcoin::Witness::from_slice(witness)).len()
     }
 
-    // Checks that both satisfaction methods select the script
+    // Checks that satisfying and planning, malleable or not, both select the script
     // spend with the smallest serialized witness, and that this witness has `size` bytes.
     fn assert_smallest_script_spend<S: Satisfier<bitcoin::PublicKey>>(
         tr: &Tr<bitcoin::PublicKey>,
@@ -692,6 +789,15 @@ mod tests {
             };
             assert_eq!(witness, smallest, "mall: {}", mall);
             assert!(script_sig.is_empty());
+
+            let plan = if mall {
+                tr.plan_satisfaction_mall(satisfier)
+            } else {
+                tr.plan_satisfaction(satisfier)
+            };
+            assert_eq!(plan.witness_size(), Some(size), "mall: {}", mall);
+            let completed = plan.try_completing(satisfier).unwrap();
+            assert_eq!(completed.stack, Witness::Stack(smallest), "mall: {}", mall);
         }
     }
 
@@ -754,5 +860,90 @@ mod tests {
         )
         .unwrap();
         assert_smallest_script_spend(&tr, &signatures(&tr, key), 8922);
+    }
+
+    #[test]
+    fn plan_raw_pkh_with_signature_lookup() {
+        let key = test_key();
+        let pkh = key.to_pubkeyhash(SigType::Schnorr);
+        let ms =
+            Ms::from_str_ext(&format!("c:expr_raw_pkh({})", pkh), &ExtParams::allow_all()).unwrap();
+        let tr = Tr::new(key, Some(TapTree::leaf(ms))).unwrap();
+        // This satisfier only knows the key of the hash together with its signature.
+        let sigs: HashMap<_, _> = signatures(&tr, key)
+            .into_iter()
+            .map(|((pk, leaf_hash), sig)| ((pkh, leaf_hash), (pk, sig)))
+            .collect();
+        // 1 + (1 + 64) + (1 + 32) + (1 + 25) + (1 + 33)
+        assert_smallest_script_spend(&tr, &sigs, 159);
+    }
+
+    #[test]
+    fn plan_deep_leaf() {
+        let key = test_key();
+        // `and_v(v:1,` nested 256 times around `pk(key)`. Building it from fragments keeps
+        // the recursive parser out of this test of the planner's traversal.
+        let verify_true = Arc::new(
+            Ms::from_ast(Terminal::Verify(Arc::new(
+                Ms::from_ast(Terminal::True).unwrap(),
+            )))
+            .unwrap(),
+        );
+        let ms = (0..256).fold(Ms::from_str(&format!("pk({})", key)).unwrap(), |ms, _| {
+            Ms::from_ast(Terminal::AndV(Arc::clone(&verify_true), Arc::new(ms))).unwrap()
+        });
+        let tr = Tr::new(key, Some(TapTree::leaf(ms))).unwrap();
+        // 1 + (1 + 64) + (3 + 256 * 2 + 34) + (1 + 33)
+        assert_smallest_script_spend(&tr, &signatures(&tr, key), 649);
+    }
+
+    #[test]
+    fn plan_ignores_extension_leaves() {
+        struct Signers(Vec<bitcoin::PublicKey>);
+
+        impl AssetProvider<bitcoin::PublicKey> for Signers {
+            fn provider_lookup_tap_leaf_script_sig(
+                &self,
+                pk: &bitcoin::PublicKey,
+                _: &TapLeafHash,
+            ) -> Option<usize> {
+                if self.0.contains(pk) {
+                    Some(64)
+                } else {
+                    None
+                }
+            }
+        }
+
+        let [a, b] = [
+            "0250929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0",
+            "03774eec7a3d550d18e9f89414152025b3b0ad6a342b19481f702d843cff06dfc4",
+        ]
+        .map(|key| bitcoin::PublicKey::from_str(key).unwrap());
+        let desc = format!(
+            "eltr(03cc8a4bc64d897bddc5fbc2f670f7a8ba0b386779106cf1223c6fc5d7cd6fc115,{{pk({}),and_v(v:pk({}),is_exp_asset(out_asset(0)))}})",
+            a, b
+        );
+        let tr = Tr::<bitcoin::PublicKey, CovenantExt<CovExtArgs>>::from_str(&desc).unwrap();
+        let spend_info = tr.spend_info();
+        let leaf = spend_info.leaves().next().unwrap();
+
+        let plan = tr.plan_satisfaction(&Signers(vec![a, b]));
+        let expected = vec![
+            Placeholder::SchnorrSigPk(
+                a,
+                SchnorrSigType::ScriptSpend {
+                    leaf_hash: leaf.leaf_hash(),
+                },
+                64,
+            ),
+            Placeholder::TapScript(leaf.script().clone()),
+            Placeholder::TapControlBlock(leaf.control_block().clone()),
+        ];
+        assert_eq!(plan.stack, Witness::Stack(expected));
+        assert_eq!(
+            tr.plan_satisfaction(&Signers(vec![b])).stack,
+            Witness::Unavailable
+        );
     }
 }
