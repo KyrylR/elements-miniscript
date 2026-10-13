@@ -131,6 +131,7 @@ pub mod expression;
 pub mod extensions;
 pub mod interpreter;
 pub mod miniscript;
+pub mod plan;
 pub mod policy;
 pub mod psbt;
 

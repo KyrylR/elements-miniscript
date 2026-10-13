@@ -21,6 +21,7 @@
 - PSET inputs record a `tap_scripts` entry for each distinct control block of a repeated leaf script. Previously each script had a single entry with its shortest control block.
 - `TapTree` is ordered by its list of leaf depths and Miniscripts, so a single leaf orders before any tree with branches. `Policy::compile_tr` and `Policy::compile_tr_private_experimental` use this order for branches of equal probability. A subtree is now placed to the left of a leaf of equal probability, and other equal-probability branches can also be ordered differently, which changes the resulting descriptor and address. `Policy::compile_tr_private_experimental` returns an error instead of panicking when its Huffman tree is empty.
 - When `Tr::get_satisfaction` and `Tr::get_satisfaction_mall` choose between the script path witnesses of different leaves, they compare their full serialized sizes, including the item count and the length prefix of every item. Previously they could choose the leaf with the larger witness, for example one whose control block needs a 3-byte length prefix.
+- Add Taproot `AssetProvider` and `Assets` lookups for signing keys, leaf restrictions, signature lengths, preimages and timelock limits.
 
 # 0.5.0 - Sep 20, 2026
 
